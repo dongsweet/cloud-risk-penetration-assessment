@@ -62,7 +62,6 @@ class DbService extends Service {
     this.seedSystemConfig();
     const count = this._db.prepare('SELECT COUNT(*) AS n FROM projects').get().n;
     if (!count) this.seedEmpty();
-    this.purgeLegacyDemoData();
   }
 
   seedAccessControl() {
@@ -85,24 +84,6 @@ class DbService extends Service {
     const timestamp = this.now();
     this._db.prepare('INSERT INTO projects (id,name,scope,status,created_at,updated_at) VALUES (?,?,?,?,?,?)').run('PRJ-DEMO-001', '跨层风险穿透评估项目', '待从 Excel 图谱或证据材料导入评估范围', 'draft', timestamp, timestamp);
     this._db.prepare('INSERT INTO audit_logs (project_id,action,detail,actor,created_at) VALUES (?,?,?,?,?)').run('PRJ-DEMO-001', 'initialize_project', '创建空评估项目，等待导入资产图谱', 'system', timestamp);
-  }
-
-  purgeLegacyDemoData() {
-    // 仅清理由旧版本留下的演示数据；新版本不包含任何预置证据或资产。
-    const sampleNodes = this._db.prepare("SELECT id FROM nodes WHERE meta_json LIKE '%演示样例数据%' OR id IN ('H01','V1','VM-A1','DB-A','BIZ-A','U01','R01','SG01')").all().map(row => row.id);
-    const placeholders = sampleNodes.length ? sampleNodes.map(() => '?').join(',') : "''";
-    const tx = this._db.transaction(() => {
-      if (sampleNodes.length) {
-        this._db.prepare('DELETE FROM edges WHERE from_id IN (' + placeholders + ') OR to_id IN (' + placeholders + ')').run(...sampleNodes, ...sampleNodes);
-        this._db.prepare('DELETE FROM nodes WHERE id IN (' + placeholders + ')').run(...sampleNodes);
-      }
-      this._db.prepare("DELETE FROM risks WHERE project_id='PRJ-DEMO-001'").run();
-      this._db.prepare("DELETE FROM evidence WHERE project_id='PRJ-DEMO-001' AND (filename LIKE '%漏洞扫描%' OR filename LIKE '%业务说明%' OR filename LIKE '%权限审计%' OR source LIKE '漏洞扫描平台 %' OR source LIKE '业务说明文档 %' OR source LIKE '权限审计平台 %')").run();
-      this._db.prepare("DELETE FROM followups WHERE project_id='PRJ-DEMO-001' AND (id='FU-001' OR slot LIKE 'edge:E08%' OR title LIKE '历史权限关系%')").run();
-      this._db.prepare("DELETE FROM remediation_tasks WHERE project_id='PRJ-DEMO-001' AND (id='TASK-001' OR title LIKE '升级 V1%')").run();
-      this._db.prepare("UPDATE projects SET name='跨层风险穿透评估项目',scope='待从 Excel 图谱或证据材料导入评估范围',status='draft',updated_at=? WHERE id='PRJ-DEMO-001' AND (name='政务云跨层风险穿透评估演示' OR scope LIKE '平台侧基础设施%')").run(this.now());
-    });
-    tx();
   }
 
   now() { return new Date().toISOString(); }
