@@ -1,10 +1,8 @@
 demo/.env
+demo/llm.txt
 demo/node_modules/
 demo/data/*.db
 demo/data/tmp/
 demo/uploads/*
 !demo/uploads/.gitkeep
 demo/logs/
-
-demo/data/*.db-shm
-demo/data/*.db-wal
