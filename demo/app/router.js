@@ -7,6 +7,9 @@ module.exports = app => {
   const { router, controller } = app;
   router.get('/', ctx => {
     ctx.type = 'html';
+    ctx.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    ctx.set('Pragma', 'no-cache');
+    ctx.set('Expires', '0');
     ctx.body = fs.createReadStream(path.join(app.config.baseDir, 'public', 'index.html'));
   });
   router.get('/health', controller.api.health);
