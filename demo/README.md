@@ -19,14 +19,14 @@ git clone git@github.com:dongsweet/cloud-risk-penetration-assessment.git
 cd cloud-risk-penetration-assessment/demo
 cp .env.example .env
 vi .env
-# 若测试机已有服务占用 7001，可改成 HOST_PORT=17001
+# 若测试机已有服务占用 7001，可改成 HOST_PORT=17003
 docker compose up -d --build
 curl http://127.0.0.1:7001/health
 ```
 
 将 `.env` 中的 `LLM_BASE_URL`、`LLM_API_KEY` 和 `LLM_MODEL` 配置为实际 OpenAI-compatible 服务。密钥只在服务端使用，不写入 SQLite，也不返回前端。未配置模型时，系统仍可浏览样例图谱并执行规则计算，但上传证据的抽取会明确保持 `pending` 并提示配置错误。
 
-访问 `http://服务器地址:17001/`（若按默认端口部署则为 `7001`），当前测试机为 `http://172.20.30.201:17001/`。建议录屏顺序：
+访问 `http://服务器地址:17003/`（若按默认端口部署则为 `7001`），当前测试机为 `http://172.20.30.201:17003/`。建议录屏顺序：
 
 1. 总览：展示项目范围、闭环进度、节点/路径/高风险/待补全统计。
 2. 证据采集：上传一份 TXT 或 DOCX，点击“调用模型抽取”，展示资产候选、来源和置信度。
