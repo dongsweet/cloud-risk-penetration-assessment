@@ -1,0 +1,95 @@
+'use strict';
+
+// 仅用于生成可下载的虚构演示数据包，不会在应用启动时自动写入数据库。
+const f = (C, N, P, R, E, B, I) => ({ C, N, P, R, E, B, I });
+
+const assets = [
+  { id: 'R-DC1', name: '政务云资源池 DC1', type: 'resource_pool', layer: 'platform', pool: 'R-DC1', value: .8, importance: .85, sensitivity: .6, availability: .95, impact: .8, source: '云管平台资源池清单', confidence: .98, description: '承载三个租户业务的共享计算资源池' },
+  { id: 'H-001', name: '计算节点 H-001', type: 'host', layer: 'platform', pool: 'R-DC1', value: .82, importance: .85, sensitivity: .65, availability: .95, impact: .85, risk_name: '宿主机内核漏洞', probability: .55, source: '云管平台 CMDB', confidence: .97, description: '承载租户 A API、Web 虚拟机' },
+  { id: 'H-002', name: '计算节点 H-002', type: 'host', layer: 'platform', pool: 'R-DC1', value: .82, importance: .85, sensitivity: .7, availability: .95, impact: .85, source: '云管平台 CMDB', confidence: .97, description: '承载租户 B API、Web 虚拟机' },
+  { id: 'H-003', name: '计算节点 H-003', type: 'host', layer: 'platform', pool: 'R-DC1', value: .78, importance: .8, sensitivity: .6, availability: .92, impact: .8, source: '云管平台 CMDB', confidence: .96, description: '承载租户 C 归档业务虚拟机' },
+  { id: 'VIRT-001', name: '虚拟化组件 VIRT-001', type: 'virtualization', layer: 'platform', pool: 'R-DC1', value: .86, importance: .9, sensitivity: .7, availability: .95, impact: .9, risk_name: '虚拟化逃逸高危漏洞', probability: .48, source: '漏洞扫描平台', confidence: .94, description: '部署在 H-001/H-002 上的虚拟化控制组件' },
+  { id: 'VIRT-002', name: '虚拟化组件 VIRT-002', type: 'virtualization', layer: 'platform', pool: 'R-DC1', value: .8, importance: .82, sensitivity: .65, availability: .93, impact: .8, source: '漏洞扫描平台', confidence: .94, description: '部署在 H-003 上的虚拟化控制组件' },
+  { id: 'LB-001', name: '统一负载均衡 LB-001', type: 'network', layer: 'platform', pool: 'R-DC1', value: .75, importance: .8, sensitivity: .5, availability: .95, impact: .75, source: '网络拓扑清单', confidence: .92, description: '对外暴露租户 Web 服务的共享入口' },
+  { id: 'OPS-ROOT', name: '平台超级运维账号', type: 'account', layer: 'platform', pool: 'R-DC1', value: .85, importance: .95, sensitivity: .9, availability: .9, impact: .95, risk_name: '平台超级账号权限过宽', probability: .42, source: '权限审计平台', confidence: .9, description: '可管理资源池、虚拟机和网络策略' },
+  { id: 'OPS-SEC', name: '安全策略运维账号', type: 'account', layer: 'platform', pool: 'R-DC1', value: .7, importance: .8, sensitivity: .75, availability: .9, impact: .8, source: '权限审计平台', confidence: .9, description: '负责安全组、WAF 和密钥策略维护' },
+  { id: 'KMS-001', name: '租户密钥管理控制 KMS-001', type: 'security_control', layer: 'control', tenant: '平台共享', pool: 'R-DC1', value: .8, importance: .85, sensitivity: .9, availability: .95, impact: .85, source: '安全控制清单', confidence: .93, description: '为租户数据库和对象存储提供密钥保护' },
+  { id: 'SG-A', name: '租户 A 隔离安全组', type: 'security_control', layer: 'control', tenant: '租户 A', pool: 'R-DC1', value: .75, importance: .82, sensitivity: .55, availability: .95, impact: .8, source: '安全组配置', confidence: .95, description: '限制租户 A 数据库的跨租户访问' },
+  { id: 'SG-B', name: '租户 B 隔离安全组', type: 'security_control', layer: 'control', tenant: '租户 B', pool: 'R-DC1', value: .75, importance: .82, sensitivity: .55, availability: .95, impact: .8, source: '安全组配置', confidence: .95, description: '限制租户 B 医疗业务数据访问' },
+  { id: 'WAF-001', name: '政务服务 WAF-001', type: 'security_control', layer: 'control', tenant: '平台共享', pool: 'R-DC1', value: .7, importance: .8, sensitivity: .45, availability: .94, impact: .75, source: '安全控制清单', confidence: .92, description: '过滤来自公网的 Web 攻击流量' },
+  { id: 'VM-A-API', name: '租户 A API 虚拟机', type: 'vm', layer: 'tenant', tenant: '租户 A', pool: 'R-DC1', value: .8, importance: .85, sensitivity: .75, availability: .92, impact: .8, source: '云管平台 CMDB', confidence: .97, description: '政务服务 API 服务节点' },
+  { id: 'VM-A-WEB', name: '租户 A Web 虚拟机', type: 'vm', layer: 'tenant', tenant: '租户 A', pool: 'R-DC1', value: .78, importance: .82, sensitivity: .7, availability: .92, impact: .78, source: '云管平台 CMDB', confidence: .97, description: '政务服务门户 Web 节点' },
+  { id: 'APP-A-API', name: '租户 A 政务服务 API', type: 'application', layer: 'tenant', tenant: '租户 A', pool: 'R-DC1', value: .84, importance: .9, sensitivity: .86, availability: .94, impact: .9, source: '应用资产目录', confidence: .95, description: '受理、查询和事项编排 API 应用' },
+  { id: 'APP-A-WEB', name: '租户 A 政务服务门户', type: 'application', layer: 'tenant', tenant: '租户 A', pool: 'R-DC1', value: .8, importance: .86, sensitivity: .8, availability: .94, impact: .86, source: '应用资产目录', confidence: .95, description: '面向公众的政务服务门户应用' },
+  { id: 'DB-A-CORE', name: '租户 A 核心数据库', type: 'database', layer: 'tenant', tenant: '租户 A', pool: 'R-DC1', value: .98, importance: .98, sensitivity: 1, availability: .96, impact: .98, source: '数据库资产清单', confidence: .98, description: '存储政务服务事项和申请人信息' },
+  { id: 'OBJ-A-FILE', name: '租户 A 申报材料对象存储', type: 'storage', layer: 'tenant', tenant: '租户 A', pool: 'R-DC1', value: .9, importance: .88, sensitivity: .95, availability: .94, impact: .9, source: '存储资产清单', confidence: .94, description: '保存身份证明、附件和审批材料' },
+  { id: 'U-A-OPS', name: '租户 A 运维账号', type: 'account', layer: 'tenant', tenant: '租户 A', pool: 'R-DC1', value: .7, importance: .75, sensitivity: .75, availability: .85, impact: .78, risk_name: '租户运维账号长期有效', probability: .32, source: '租户权限审计', confidence: .87, description: '负责租户 A 虚拟机和数据库运维' },
+  { id: 'SVC-A-API', name: '租户 A API 服务账号', type: 'account', layer: 'tenant', tenant: '租户 A', pool: 'R-DC1', value: .65, importance: .72, sensitivity: .8, availability: .9, impact: .75, source: '应用凭据清单', confidence: .88, description: 'API 服务访问核心数据库和对象存储' },
+  { id: 'BIZ-A-GOV', name: '政务服务事项申报', type: 'business', layer: 'tenant', tenant: '租户 A', pool: 'R-DC1', value: 1, importance: 1, sensitivity: .98, availability: .98, impact: 1, source: '租户业务目录', confidence: .98, description: '面向公众的政务服务核心业务' },
+  { id: 'VM-B-API', name: '租户 B API 虚拟机', type: 'vm', layer: 'tenant', tenant: '租户 B', pool: 'R-DC1', value: .8, importance: .86, sensitivity: .9, availability: .93, impact: .85, source: '云管平台 CMDB', confidence: .97, description: '医疗预约 API 服务节点' },
+  { id: 'VM-B-WEB', name: '租户 B Web 虚拟机', type: 'vm', layer: 'tenant', tenant: '租户 B', pool: 'R-DC1', value: .76, importance: .8, sensitivity: .82, availability: .92, impact: .8, source: '云管平台 CMDB', confidence: .97, description: '医疗预约门户 Web 节点' },
+  { id: 'APP-B-API', name: '租户 B 医疗预约 API', type: 'application', layer: 'tenant', tenant: '租户 B', pool: 'R-DC1', value: .86, importance: .92, sensitivity: .95, availability: .95, impact: .92, source: '应用资产目录', confidence: .95, description: '预约、排班和就诊服务 API 应用' },
+  { id: 'APP-B-WEB', name: '租户 B 医疗预约门户', type: 'application', layer: 'tenant', tenant: '租户 B', pool: 'R-DC1', value: .82, importance: .88, sensitivity: .9, availability: .94, impact: .88, source: '应用资产目录', confidence: .95, description: '面向公众的医疗预约门户应用' },
+  { id: 'DB-B-MED', name: '租户 B 医疗业务数据库', type: 'database', layer: 'tenant', tenant: '租户 B', pool: 'R-DC1', value: .99, importance: 1, sensitivity: 1, availability: .97, impact: 1, source: '数据库资产清单', confidence: .98, description: '保存预约记录和敏感医疗业务数据' },
+  { id: 'U-B-OPS', name: '租户 B 运维账号', type: 'account', layer: 'tenant', tenant: '租户 B', pool: 'R-DC1', value: .68, importance: .76, sensitivity: .85, availability: .85, impact: .8, source: '租户权限审计', confidence: .86, description: '负责租户 B 应用和数据库运维' },
+  { id: 'SVC-B-API', name: '租户 B API 服务账号', type: 'account', layer: 'tenant', tenant: '租户 B', pool: 'R-DC1', value: .65, importance: .72, sensitivity: .9, availability: .9, impact: .78, source: '应用凭据清单', confidence: .88, description: 'API 服务访问医疗业务数据库' },
+  { id: 'BIZ-B-MED', name: '医疗预约服务', type: 'business', layer: 'tenant', tenant: '租户 B', pool: 'R-DC1', value: 1, importance: 1, sensitivity: 1, availability: .98, impact: 1, source: '租户业务目录', confidence: .98, description: '提供预约挂号和就诊排班服务' },
+  { id: 'VM-C-ARCH', name: '租户 C 归档虚拟机', type: 'vm', layer: 'tenant', tenant: '租户 C', pool: 'R-DC1', value: .65, importance: .7, sensitivity: .8, availability: .85, impact: .7, source: '云管平台 CMDB', confidence: .95, description: '电子档案归档和检索节点' },
+  { id: 'APP-C-ARCH', name: '租户 C 电子档案应用', type: 'application', layer: 'tenant', tenant: '租户 C', pool: 'R-DC1', value: .72, importance: .76, sensitivity: .86, availability: .88, impact: .78, source: '应用资产目录', confidence: .93, description: '档案归档、检索和借阅应用' },
+  { id: 'DB-C-ARCH', name: '租户 C 归档数据库', type: 'database', layer: 'tenant', tenant: '租户 C', pool: 'R-DC1', value: .85, importance: .82, sensitivity: .9, availability: .9, impact: .85, source: '数据库资产清单', confidence: .94, description: '保存历史档案和归档索引' },
+  { id: 'BIZ-C-ARCH', name: '电子档案归档服务', type: 'business', layer: 'tenant', tenant: '租户 C', pool: 'R-DC1', value: .82, importance: .8, sensitivity: .9, availability: .9, impact: .82, source: '租户业务目录', confidence: .95, description: '提供电子档案归档和查询服务' }
+];
+
+const relations = [
+  [ 'E-R01', 'R-DC1', 'H-001', '归属关系', 1, '资源池清单', .98, f(.8, .55, .2, .9, .5, .4, .25) ],
+  [ 'E-R02', 'R-DC1', 'H-002', '归属关系', 1, '资源池清单', .98, f(.8, .55, .2, .9, .5, .4, .25) ],
+  [ 'E-R03', 'R-DC1', 'H-003', '归属关系', 1, '资源池清单', .98, f(.75, .5, .2, .85, .45, .35, .25) ],
+  [ 'E-V01', 'H-001', 'VIRT-001', '组件关系', 1, '虚拟化组件清单', .96, f(.95, .55, .2, .8, .55, .45, .25) ],
+  [ 'E-V02', 'H-002', 'VIRT-001', '组件关系', 1, '虚拟化组件清单', .96, f(.95, .55, .2, .8, .55, .45, .25) ],
+  [ 'E-V03', 'H-003', 'VIRT-002', '组件关系', 1, '虚拟化组件清单', .96, f(.9, .5, .2, .75, .5, .4, .25) ],
+  [ 'E-A01', 'VIRT-001', 'VM-A-API', '承载关系', 1, '云管平台 API', .98, f(1, .7, .35, .85, .8, .8, .2) ],
+  [ 'E-A02', 'VIRT-001', 'VM-A-WEB', '承载关系', 1, '云管平台 API', .98, f(1, .7, .3, .8, .75, .75, .2) ],
+  [ 'E-B01', 'VIRT-001', 'VM-B-API', '承载关系', 1, '云管平台 API', .98, f(1, .7, .35, .85, .8, .8, .2) ],
+  [ 'E-B02', 'VIRT-001', 'VM-B-WEB', '承载关系', 1, '云管平台 API', .98, f(1, .7, .3, .8, .75, .75, .2) ],
+  [ 'E-C01', 'VIRT-002', 'VM-C-ARCH', '承载关系', 1, '云管平台 API', .97, f(.9, .6, .25, .75, .65, .65, .25) ],
+  [ 'E-A03', 'VM-A-API', 'APP-A-API', '部署关系', 1, '应用拓扑文档', .94, f(.7, .85, .55, .45, .7, .95, .25) ],
+  [ 'E-A04', 'APP-A-API', 'DB-A-CORE', '调用关系', 1, '应用拓扑文档', .94, f(.7, .85, .55, .45, .7, .95, .25) ],
+  [ 'E-A05', 'APP-A-API', 'OBJ-A-FILE', '调用关系', 1, '应用拓扑文档', .92, f(.55, .8, .5, .55, .65, .8, .3) ],
+  [ 'E-A06', 'VM-A-WEB', 'APP-A-WEB', '部署关系', 1, '应用拓扑文档', .94, f(.65, .85, .35, .4, .7, .9, .3) ],
+  [ 'E-A07', 'APP-A-WEB', 'APP-A-API', '调用关系', 1, '应用拓扑文档', .94, f(.65, .85, .35, .4, .7, .9, .3) ],
+  [ 'E-A08', 'DB-A-CORE', 'BIZ-A-GOV', '支撑关系', 1, '租户业务目录', .97, f(.65, .7, .4, .3, .65, 1, .3) ],
+  [ 'E-A09', 'OBJ-A-FILE', 'BIZ-A-GOV', '支撑关系', 1, '租户业务目录', .93, f(.5, .65, .35, .4, .6, .9, .35) ],
+  [ 'E-B03', 'VM-B-API', 'APP-B-API', '部署关系', 1, '应用拓扑文档', .94, f(.7, .85, .55, .45, .75, .95, .2) ],
+  [ 'E-B04', 'APP-B-API', 'DB-B-MED', '调用关系', 1, '应用拓扑文档', .94, f(.7, .85, .55, .45, .75, .95, .2) ],
+  [ 'E-B05', 'VM-B-WEB', 'APP-B-WEB', '部署关系', 1, '应用拓扑文档', .94, f(.65, .85, .35, .4, .7, .9, .25) ],
+  [ 'E-B06', 'APP-B-WEB', 'APP-B-API', '调用关系', 1, '应用拓扑文档', .94, f(.65, .85, .35, .4, .7, .9, .25) ],
+  [ 'E-B07', 'DB-B-MED', 'BIZ-B-MED', '支撑关系', 1, '租户业务目录', .97, f(.65, .72, .4, .3, .7, 1, .25) ],
+  [ 'E-C02', 'VM-C-ARCH', 'APP-C-ARCH', '部署关系', 1, '应用拓扑文档', .93, f(.65, .65, .35, .4, .6, .8, .3) ],
+  [ 'E-C03', 'APP-C-ARCH', 'DB-C-ARCH', '调用关系', 1, '应用拓扑文档', .93, f(.65, .65, .35, .4, .6, .8, .3) ],
+  [ 'E-C04', 'DB-C-ARCH', 'BIZ-C-ARCH', '支撑关系', 1, '租户业务目录', .95, f(.6, .65, .35, .3, .6, .95, .35) ],
+  [ 'E-LB1', 'LB-001', 'VM-A-WEB', '网络可达关系', 1, '网络拓扑清单', .92, f(.35, 1, .2, .2, .9, .75, .45) ],
+  [ 'E-LB2', 'LB-001', 'VM-B-WEB', '网络可达关系', 1, '网络拓扑清单', .92, f(.35, 1, .2, .2, .9, .75, .45) ],
+  [ 'E-OPS1', 'OPS-ROOT', 'R-DC1', '权限关系', 1, '平台权限审计', .9, f(.35, .7, 1, .8, .95, .75, .15) ],
+  [ 'E-OPS2', 'OPS-ROOT', 'DB-B-MED', '直接权限关系', 0, '历史权限审计 2025-12', .58, f(.2, .7, 1, .35, .85, .9, .1) ],
+  [ 'E-OPS3', 'OPS-SEC', 'SG-A', '权限关系', 1, '安全权限审计', .91, f(.3, .65, .9, .45, .7, .6, .7) ],
+  [ 'E-UA1', 'U-A-OPS', 'VM-A-API', '权限关系', 1, '租户 A 权限审计', .88, f(.3, .65, .85, .35, .7, .75, .25) ],
+  [ 'E-UA2', 'U-A-OPS', 'DB-A-CORE', '权限关系', 1, '租户 A 权限审计', .88, f(.25, .65, .9, .35, .75, .85, .2) ],
+  [ 'E-UA3', 'SVC-A-API', 'APP-A-API', '权限关系', 1, '应用凭据清单', .9, f(.3, .7, .9, .25, .65, .9, .25) ],
+  [ 'E-UA4', 'SVC-A-API', 'DB-A-CORE', '权限关系', 1, '应用凭据清单', .9, f(.3, .7, .9, .25, .65, .9, .25) ],
+  [ 'E-UB1', 'U-B-OPS', 'VM-B-API', '权限关系', 1, '租户 B 权限审计', .87, f(.3, .65, .85, .35, .7, .75, .25) ],
+  [ 'E-UB2', 'U-B-OPS', 'DB-B-MED', '权限关系', 1, '租户 B 权限审计', .87, f(.25, .65, .9, .35, .75, .85, .2) ],
+  [ 'E-UB3', 'SVC-B-API', 'APP-B-API', '权限关系', 1, '应用凭据清单', .9, f(.3, .7, .9, .25, .7, .9, .2) ],
+  [ 'E-UB4', 'SVC-B-API', 'DB-B-MED', '权限关系', 1, '应用凭据清单', .9, f(.3, .7, .9, .25, .7, .9, .2) ],
+  [ 'E-SG1', 'SG-A', 'DB-A-CORE', '隔离控制', 1, '安全组配置', .95, f(.2, .2, .15, .2, .2, .75, .95) ],
+  [ 'E-SG2', 'SG-B', 'DB-B-MED', '隔离控制', 1, '安全组配置', .95, f(.2, .2, .15, .2, .2, .75, .95) ],
+  [ 'E-WAF1', 'WAF-001', 'LB-001', '隔离控制', 1, 'WAF 策略清单', .9, f(.2, .75, .25, .2, .8, .7, .75) ]
+].map(([ id, from, to, relation, active, source, confidence, factors ]) => ({ id, from, to, relation, active, source, confidence, factors }));
+
+const risks = [
+  { node_id: 'H-001', name: '宿主机内核漏洞', probability: .55, source: '漏洞扫描平台', confidence: .92 },
+  { node_id: 'VIRT-001', name: '虚拟化逃逸高危漏洞', probability: .48, source: '漏洞扫描平台', confidence: .9 },
+  { node_id: 'OPS-ROOT', name: '平台超级账号权限过宽', probability: .42, source: '平台权限审计', confidence: .88 },
+  { node_id: 'U-A-OPS', name: '租户 A 运维账号长期有效', probability: .32, source: '租户 A 权限审计', confidence: .85 }
+];
+
+module.exports = { assets, relations, risks };

@@ -24,6 +24,7 @@ module.exports = app => {
   router.put('/api/v1/system/config', controller.api.systemConfig);
   router.get('/api/v1/auth-events', controller.api.authEvents);
   router.get('/api/v1/templates/graph.xlsx', controller.api.graphTemplate);
+  router.get('/api/v1/templates/sample-graph.xlsx', controller.api.sampleGraphTemplate);
   router.get('/api/v1/dashboard', controller.api.dashboard);
   router.get('/api/v1/projects', controller.api.projects);
   router.post('/api/v1/projects', controller.api.createProject);

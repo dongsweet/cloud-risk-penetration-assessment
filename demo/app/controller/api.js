@@ -8,6 +8,7 @@ const mammoth = require('mammoth');
 const PDFDocument = require('pdfkit');
 const ExcelJS = require('exceljs');
 const evidenceTools = require('../lib/evidence');
+const sampleGraph = require('../lib/sample-graph');
 const { cookie } = require('../middleware/authorize');
 
 function id(prefix) { return `${prefix}-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`; }
@@ -144,6 +145,71 @@ class ApiController extends Controller {
     [ '模板不含示例资产，请直接填写本次评估材料中的真实数据。', '资产 asset_type 可填 host/virtualization/vm/container/application/database/business/account/resource_pool/security_control/storage/network/other。', '资产 layer 只能填 platform、tenant 或 control；关系类型使用系统允许的中文枚举；active 可填 有效/失效 或 true/false。', '置信度和计算因子填写 0 到 1；导入前服务端会校验整本工作簿，错误行会整体拒绝，不会生成部分图谱。', '关系边引用的 source_asset_id 和 target_asset_id 必须存在于资产节点工作表或当前项目图谱中。' ].forEach(text => note.addRow([ text ]));
     this.ctx.type = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
     this.ctx.set('Content-Disposition', 'attachment; filename="cloud-risk-graph-template.xlsx"');
+    this.ctx.body = await workbook.xlsx.writeBuffer();
+  }
+
+  async sampleGraphTemplate() {
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = '云盾 RiskLab';
+    workbook.created = new Date();
+    const styleSheet = (sheet, widths = []) => {
+      sheet.views = [ { state: 'frozen', ySplit: 1 } ];
+      sheet.autoFilter = { from: 'A1', to: `${String.fromCharCode(64 + Math.min(sheet.columnCount, 26))}1` };
+      sheet.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } };
+      sheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: '176B87' } };
+      sheet.getRow(1).alignment = { vertical: 'middle', wrapText: true };
+      sheet.getRow(1).height = 28;
+      sheet.columns.forEach((column, index) => { column.width = widths[index] || Math.max(14, String(column.header || '').length * 2.2); });
+      sheet.eachRow((row, rowNumber) => {
+        if (rowNumber > 1) row.alignment = { vertical: 'top', wrapText: true };
+        if (rowNumber % 2 === 0) row.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'F2F8FA' } };
+      });
+    };
+    const addDataSheet = (name, headers, rows, widths) => {
+      const sheet = workbook.addWorksheet(name);
+      sheet.columns = headers.map(header => ({ header, key: header }));
+      rows.forEach(row => sheet.addRow(row));
+      styleSheet(sheet, widths);
+      return sheet;
+    };
+    const assetHeaders = [ 'asset_id', 'asset_name', 'asset_type', 'layer', 'tenant', 'pool', 'value', 'importance', 'sensitivity', 'availability', 'impact', 'risk_name', 'probability', 'source', 'confidence', 'description' ];
+    addDataSheet('资产节点', assetHeaders, sampleGraph.assets.map(asset => assetHeaders.map(key => key === 'asset_id' ? asset.id : key === 'asset_name' ? asset.name : key === 'asset_type' ? asset.type : asset[key] ?? '')), [ 16, 28, 17, 12, 14, 12, 11, 11, 12, 13, 11, 25, 13, 20, 12, 46 ]);
+    const relationHeaders = [ 'edge_id', 'source_asset_id', 'target_asset_id', 'relation_type', 'active', 'source', 'confidence', 'valid_from', 'valid_to', 'C', 'N', 'P', 'R', 'E', 'B', 'I' ];
+    addDataSheet('关系边', relationHeaders, sampleGraph.relations.map(edge => [ edge.id, edge.from, edge.to, edge.relation, edge.active ? '有效' : '失效', edge.source, edge.confidence, '', '', ...[ 'C', 'N', 'P', 'R', 'E', 'B', 'I' ].map(key => edge.factors[key]) ]), [ 14, 18, 18, 16, 12, 22, 12, 16, 16, 8, 8, 8, 8, 8, 8, 8 ]);
+    addDataSheet('风险源', [ 'node_id', 'risk_name', 'probability', 'source', 'confidence' ], sampleGraph.risks.map(risk => [ risk.node_id, risk.name, risk.probability, risk.source, risk.confidence ]), [ 18, 30, 14, 22, 14 ]);
+
+    addDataSheet('计算节点清单', [ '计算节点ID', '计算节点名称', '资源池', '虚拟化组件', '运行虚拟机', '平台运维账号', '运行状态', '用途说明' ], [
+      [ 'H-001', '计算节点 H-001', 'R-DC1', 'VIRT-001', 'VM-A-API；VM-A-WEB', 'OPS-ROOT', '运行中', '承载租户 A 政务服务 API 和门户，存在宿主机内核漏洞演示风险' ],
+      [ 'H-002', '计算节点 H-002', 'R-DC1', 'VIRT-001', 'VM-B-API；VM-B-WEB', 'OPS-ROOT', '运行中', '承载租户 B 医疗预约 API 和门户，与租户 A 共用虚拟化组件' ],
+      [ 'H-003', '计算节点 H-003', 'R-DC1', 'VIRT-002', 'VM-C-ARCH', 'OPS-ROOT', '运行中', '承载租户 C 电子档案归档业务，作为第三租户对照组' ]
+    ], [ 16, 24, 14, 18, 28, 18, 14, 52 ]);
+    addDataSheet('账号与权限', [ '账号ID', '账号名称', '所属范围', '账号类型', '可访问资产', '权限范围', '状态', '证据来源' ], [
+      [ 'OPS-ROOT', '平台超级运维账号', '平台共享', '平台超级账号', 'R-DC1；H-001；H-002；H-003；LB-001', '资源池、计算节点、虚拟机和网络策略全管理', '有效', '平台权限审计' ],
+      [ 'OPS-SEC', '安全策略运维账号', '平台共享', '安全运维账号', 'SG-A；SG-B；WAF-001；KMS-001', '安全组、WAF 和密钥策略维护', '有效', '安全权限审计' ],
+      [ 'U-A-OPS', '租户 A 运维账号', '租户 A', '租户运维账号', 'VM-A-API；DB-A-CORE', '租户 A 应用和数据库运维', '长期有效', '租户 A 权限审计' ],
+      [ 'SVC-A-API', '租户 A API 服务账号', '租户 A', '应用服务账号', 'APP-A-API；DB-A-CORE；OBJ-A-FILE', 'API 读写业务库和申报材料', '有效', '应用凭据清单' ],
+      [ 'U-B-OPS', '租户 B 运维账号', '租户 B', '租户运维账号', 'VM-B-API；DB-B-MED', '租户 B 应用和数据库运维', '有效', '租户 B 权限审计' ],
+      [ 'SVC-B-API', '租户 B API 服务账号', '租户 B', '应用服务账号', 'APP-B-API；DB-B-MED', 'API 访问医疗预约数据库', '有效', '应用凭据清单' ]
+    ], [ 16, 24, 14, 18, 42, 42, 14, 20 ]);
+    addDataSheet('业务承载矩阵', [ '业务ID', '业务名称', '租户', '应用/服务', '虚拟机', '数据库', '对象存储', '网络入口', '安全控制', '关键数据与影响' ], [
+      [ 'BIZ-A-GOV', '政务服务事项申报', '租户 A', 'APP-A-WEB；APP-A-API', 'VM-A-WEB；VM-A-API', 'DB-A-CORE', 'OBJ-A-FILE', 'LB-001', 'WAF-001；SG-A；KMS-001', '申请人信息、身份证明和审批材料，业务连续性要求高' ],
+      [ 'BIZ-B-MED', '医疗预约服务', '租户 B', 'APP-B-WEB；APP-B-API', 'VM-B-WEB；VM-B-API', 'DB-B-MED', '—', 'LB-001', 'WAF-001；SG-B；KMS-001', '预约记录和医疗业务数据，数据敏感度高' ],
+      [ 'BIZ-C-ARCH', '电子档案归档服务', '租户 C', 'APP-C-ARCH', 'VM-C-ARCH', 'DB-C-ARCH', '—', '—', 'KMS-001', '历史档案及归档索引，作为跨租户对照业务' ]
+    ], [ 16, 24, 14, 28, 28, 18, 20, 16, 30, 50 ]);
+    const note = workbook.addWorksheet('填写说明');
+    note.columns = [ { header: '说明', key: 'note', width: 110 } ];
+    [
+      '本工作簿是虚构政务云样例，仅用于录屏、预审可行性和系统功能演示，不对应任何真实生产环境。',
+      '使用方式：下载本数据包 → 可在 Excel 中修改或补充 → 通过“证据采集与抽取”页面上传 → 服务端校验后写入当前评估项目。数据包不会在容器启动时自动写入数据库。',
+      '“资产节点”“关系边”“风险源”三个工作表可直接被系统导入；其余工作表用于说明计算节点、账号权限和业务承载关系，便于复核数据构造逻辑。',
+      '演示路径示例：H-001 → VIRT-001 → VM-A-API → APP-A-API → DB-A-CORE → BIZ-A-GOV；H-001 → VIRT-001 → VM-B-API → APP-B-API → DB-B-MED → BIZ-B-MED。',
+      'E-OPS2 是历史权限审计中的失效权限边，导入后保留在图谱中但不会进入有效穿透路径；这用于展示失效关系和环路处理。',
+      '账号、业务、风险源、来源、置信度和评分因子均为虚构演示值。正式项目应替换为经授权采集的 CMDB、权限审计、网络拓扑、应用目录和业务目录证据。'
+    ].forEach(value => note.addRow([ value ]));
+    note.getColumn(1).alignment = { wrapText: true, vertical: 'top' };
+    note.eachRow(row => { row.height = 34; });
+    this.ctx.type = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+    this.ctx.set('Content-Disposition', 'attachment; filename="cloud-risk-sample-government-cloud.xlsx"');
     this.ctx.body = await workbook.xlsx.writeBuffer();
   }
 
