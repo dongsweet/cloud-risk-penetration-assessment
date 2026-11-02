@@ -11,6 +11,6 @@ RUN mkdir -p /app/data /app/uploads /app/public/vendor \
  && cp node_modules/bootstrap/dist/js/bootstrap.bundle.min.js public/vendor/bootstrap.bundle.min.js \
  && cp node_modules/bootstrap-icons/font/bootstrap-icons.min.css public/vendor/bootstrap-icons.min.css \
  && cp -r node_modules/bootstrap-icons/font/fonts public/vendor/fonts
-ENV NODE_ENV=production PORT=7001 DATA_DIR=/app/data UPLOAD_DIR=/app/uploads SEED_DEMO_DATA=false
+ENV NODE_ENV=production PORT=7001 DATA_DIR=/app/data UPLOAD_DIR=/app/uploads
 EXPOSE 7001
 CMD ["npx", "egg-scripts", "start", "--framework=/app/framework", "--workers=2", "--title=cloud-risk-demo"]

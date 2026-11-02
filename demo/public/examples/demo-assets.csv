@@ -1,6 +1,0 @@
-asset_id,asset_name,asset_type,layer,tenant,pool,value,importance,sensitivity,impact,source,confidence,source_asset_id,target_asset_id,relation_type,active,node_id,risk_name,probability
-DB-B1,租户 B 业务数据库,database,tenant,租户 B,R02,0.9,0.85,0.9,0.8,演示资产清单,0.92,,,,,,,
-BIZ-B1,租户 B 核心业务,business,tenant,租户 B,R02,1,0.95,0.85,0.95,业务说明文档,0.94,,,,,,,
-,,,,,,,,,,,0.9,V1,DB-B1,承载关系,true,,,
-,,,,,,,,,,,0.94,DB-B1,BIZ-B1,支撑关系,true,,,
-,,,,,,,,,,,,,,,,DB-B1,数据库配置弱口令,0.4

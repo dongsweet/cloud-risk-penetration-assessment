@@ -6,8 +6,6 @@ services:
       - "${HOST_PORT:-17003}:7001"
     env_file:
       - .env
-    environment:
-      SEED_DEMO_DATA: ${SEED_DEMO_DATA:-false}
     volumes:
       - ./data:/app/data
       - ./uploads:/app/uploads

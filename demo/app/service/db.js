@@ -19,29 +19,6 @@ const DEFAULT_SYSTEM_CONFIG = Object.freeze({
   defaultRiskConfig: DEFAULTS
 });
 
-const seedNodes = [
-  { id: 'H01', name: 'H01 宿主机', kind: 'host', layer: 'platform', tenant: '', pool: 'R01', value: .75, importance: .75, sensitivity: .5, availability: .9, riskSource: 1, riskName: '虚拟化组件脆弱性', probability: .45, description: '承载租户虚拟机的计算宿主机' },
-  { id: 'V1', name: 'V1 虚拟化组件', kind: 'virtualization', layer: 'platform', tenant: '', pool: 'R01', value: .8, importance: .8, sensitivity: .6, availability: .9, riskSource: 1, riskName: '虚拟化组件高危漏洞', probability: .5, description: '宿主机侧虚拟化组件' },
-  { id: 'VM-A1', name: 'VM-A1 租户虚拟机', kind: 'vm', layer: 'tenant', tenant: '租户 A', pool: 'R01', value: .8, importance: .85, sensitivity: .8, availability: .9, riskSource: 0, description: '部署政务服务业务的计算资产' },
-  { id: 'DB-A', name: 'DB-A 租户数据库', kind: 'database', layer: 'tenant', tenant: '租户 A', pool: 'R01', value: .95, importance: .95, sensitivity: 1, availability: .95, riskSource: 0, description: '存储业务核心数据的数据库' },
-  { id: 'BIZ-A', name: '政务服务事项业务', kind: 'business', layer: 'tenant', tenant: '租户 A', pool: 'R01', value: 1, importance: 1, sensitivity: .9, availability: 1, riskSource: 0, description: '面向公众的核心政务服务' },
-  { id: 'U01', name: 'U01 平台运维账号', kind: 'account', layer: 'platform', tenant: '', pool: 'R01', value: .7, importance: .8, sensitivity: .7, availability: .8, riskSource: 1, riskName: '运维账号权限配置错误', probability: .35, description: '具有资源池运维权限的平台账号' },
-  { id: 'R01', name: '资源池 R01', kind: 'resource_pool', layer: 'platform', tenant: '', pool: 'R01', value: .75, importance: .8, sensitivity: .7, availability: .9, riskSource: 0, description: '承载租户 A 资源的共享资源池' },
-  { id: 'SG01', name: 'SG01 租户隔离安全组', kind: 'security_control', layer: 'control', tenant: '租户 A', pool: 'R01', value: .8, importance: .85, sensitivity: .5, availability: .9, riskSource: 0, description: '限制跨租户访问的安全控制' }
-];
-
-const seedEdges = [
-  { id: 'E01', from: 'H01', to: 'V1', relation: '组件关系', active: 1, source: '云平台 CMDB', confidence: .98, factors: { C: .95, N: .55, P: .2, R: .75, E: .5, B: .4, I: .25 } },
-  { id: 'E02', from: 'V1', to: 'VM-A1', relation: '承载关系', active: 1, source: '云平台 API', confidence: .97, factors: { C: 1, N: .65, P: .35, R: .85, E: .75, B: .8, I: .25 } },
-  { id: 'E03', from: 'VM-A1', to: 'DB-A', relation: '部署关系', active: 1, source: '应用拓扑文档', confidence: .92, factors: { C: .7, N: .8, P: .5, R: .45, E: .6, B: .95, I: .35 } },
-  { id: 'E04', from: 'DB-A', to: 'BIZ-A', relation: '支撑关系', active: 1, source: '业务说明文档', confidence: .95, factors: { C: .65, N: .7, P: .4, R: .3, E: .55, B: 1, I: .35 } },
-  { id: 'E05', from: 'U01', to: 'R01', relation: '权限关系', active: 1, source: '权限审计日志', confidence: .88, factors: { C: .3, N: .7, P: 1, R: .8, E: .9, B: .65, I: .2 } },
-  { id: 'E06', from: 'R01', to: 'VM-A1', relation: '归属关系', active: 1, source: '资源池清单', confidence: .96, factors: { C: .75, N: .6, P: .35, R: 1, E: .7, B: .65, I: .3 } },
-  { id: 'E07', from: 'R01', to: 'DB-A', relation: '共享资源关系', active: 1, source: '存储资源清单', confidence: .9, factors: { C: .65, N: .6, P: .3, R: 1, E: .65, B: .8, I: .35 } },
-  { id: 'E08', from: 'U01', to: 'DB-A', relation: '直接权限关系', active: 0, source: '历史权限配置', confidence: .62, factors: { C: .2, N: .7, P: .9, R: .4, E: .8, B: .85, I: .1 } },
-  { id: 'E09', from: 'SG01', to: 'DB-A', relation: '隔离控制', active: 1, source: '安全组配置', confidence: .91, factors: { C: .2, N: .2, P: .15, R: .2, E: .15, B: .75, I: .95 } }
-];
-
 class DbService extends Service {
   get db() {
     if (!this._db) {
@@ -84,11 +61,8 @@ class DbService extends Service {
     this.seedAccessControl();
     this.seedSystemConfig();
     const count = this._db.prepare('SELECT COUNT(*) AS n FROM projects').get().n;
-    if (!count) {
-      if (process.env.SEED_DEMO_DATA === 'true') this.seed();
-      else this.seedEmpty();
-    }
-    if (process.env.SEED_DEMO_DATA !== 'true') this.removeSeedDemoData();
+    if (!count) this.seedEmpty();
+    this.purgeLegacyDemoData();
   }
 
   seedAccessControl() {
@@ -107,51 +81,26 @@ class DbService extends Service {
     if (!current) this._db.prepare('INSERT INTO system_settings (setting_key,value_json,updated_by,updated_at) VALUES (?,?,?,?)').run('system', JSON.stringify(DEFAULT_SYSTEM_CONFIG), 'system', this.now());
   }
 
-  seed() {
-    const now = new Date().toISOString();
-    const project = { id: 'PRJ-DEMO-001', name: '政务云跨层风险穿透评估演示', scope: '平台侧基础设施、租户 A 业务与数据资产、权限和隔离控制', status: 'in_review' };
-    const insertProject = this._db.prepare('INSERT INTO projects (id,name,scope,status,created_at,updated_at) VALUES (@id,@name,@scope,@status,@created_at,@updated_at)');
-    const insertNode = this._db.prepare('INSERT INTO nodes (id,project_id,name,kind,layer,tenant,pool,value,importance,sensitivity,availability,impact,risk_source,risk_name,probability,description,meta_json) VALUES (@id,@project_id,@name,@kind,@layer,@tenant,@pool,@value,@importance,@sensitivity,@availability,@impact,@risk_source,@risk_name,@probability,@description,@meta_json)');
-    const insertEdge = this._db.prepare('INSERT INTO edges (id,project_id,from_id,to_id,relation,active,source,confidence,factors_json) VALUES (@id,@project_id,@from_id,@to_id,@relation,@active,@source,@confidence,@factors_json)');
-    const insertEvidence = this._db.prepare('INSERT INTO evidence (id,project_id,filename,type,content,status,extraction_json,source,confidence,created_at) VALUES (@id,@project_id,@filename,@type,@content,@status,@extraction_json,@source,@confidence,@created_at)');
-    const insertFollowup = this._db.prepare('INSERT INTO followups (id,project_id,slot,title,question,status,created_at) VALUES (@id,@project_id,@slot,@title,@question,@status,@created_at)');
-    const insertTask = this._db.prepare('INSERT INTO remediation_tasks (id,project_id,risk_id,title,owner,status,due_date,created_at) VALUES (@id,@project_id,@risk_id,@title,@owner,@status,@due_date,@created_at)');
-    const tx = this._db.transaction(() => {
-      insertProject.run({ ...project, created_at: now, updated_at: now });
-      for (const n of seedNodes) insertNode.run({ ...n, impact: n.impact ?? n.availability, project_id: project.id, risk_name: n.riskName || '', risk_source: n.riskSource || 0, probability: n.probability || 0, meta_json: JSON.stringify({ source: '演示样例数据' }) });
-      for (const e of seedEdges) insertEdge.run({ ...e, project_id: project.id, from_id: e.from, to_id: e.to, factors_json: JSON.stringify(e.factors) });
-      insertEvidence.run({ id: 'EV-001', project_id: project.id, filename: '虚拟化组件漏洞扫描报告.txt', type: 'txt', content: '扫描发现 V1 虚拟化组件存在高危漏洞，影响承载于 H01 的租户虚拟机。来源：漏洞扫描平台。', status: 'extracted', extraction_json: JSON.stringify({ assets: [ 'H01', 'V1', 'VM-A1' ], risks: [ '虚拟化组件高危漏洞' ], relations: [ 'H01 承载 VM-A1' ] }), source: '漏洞扫描平台 / 2026-10-28', confidence: .94, created_at: now });
-      insertEvidence.run({ id: 'EV-002', project_id: project.id, filename: '租户 A 业务说明.txt', type: 'txt', content: 'DB-A 存储政务服务事项业务核心数据，属于高敏感数据，业务重要性高。', status: 'extracted', extraction_json: JSON.stringify({ assets: [ 'DB-A', 'BIZ-A' ], businessImportance: '高', sensitivity: '高' }), source: '业务说明文档 / 2026-10-27', confidence: .95, created_at: now });
-      insertEvidence.run({ id: 'EV-003', project_id: project.id, filename: '权限审计日志.csv', type: 'csv', content: 'U01,R01,权限关系,管理权限,2026-10-29', status: 'extracted', extraction_json: JSON.stringify({ assets: [ 'U01', 'R01' ], permission: '管理权限' }), source: '权限审计平台 / 2026-10-29', confidence: .88, created_at: now });
-      insertFollowup.run({ id: 'FU-001', project_id: project.id, slot: 'edge:E08.source', title: '历史权限关系待确认', question: '历史配置显示 U01 可能直接访问 DB-A，但证据置信度较低且关系当前已失效。请确认该关系是否在当前权限状态下仍然有效，并提供最新审计记录。', status: 'open', created_at: now });
-      insertTask.run({ id: 'TASK-001', project_id: project.id, risk_id: '', title: '升级 V1 虚拟化组件并复核租户隔离', owner: '云平台运维组', status: 'open', due_date: '2026-11-15', created_at: now });
-      this._db.prepare('INSERT INTO audit_logs (project_id,action,detail,actor,created_at) VALUES (?,?,?,?,?)').run(project.id, 'seed', '初始化演示数据', 'system', now);
-    });
-    tx();
-  }
-
   seedEmpty() {
     const timestamp = this.now();
     this._db.prepare('INSERT INTO projects (id,name,scope,status,created_at,updated_at) VALUES (?,?,?,?,?,?)').run('PRJ-DEMO-001', '跨层风险穿透评估项目', '待从 Excel 图谱或证据材料导入评估范围', 'draft', timestamp, timestamp);
     this._db.prepare('INSERT INTO audit_logs (project_id,action,detail,actor,created_at) VALUES (?,?,?,?,?)').run('PRJ-DEMO-001', 'initialize_project', '创建空评估项目，等待导入资产图谱', 'system', timestamp);
   }
 
-  removeSeedDemoData() {
+  purgeLegacyDemoData() {
+    // 仅清理由旧版本留下的演示数据；新版本不包含任何预置证据或资产。
     const sampleNodes = this._db.prepare("SELECT id FROM nodes WHERE meta_json LIKE '%演示样例数据%' OR id IN ('H01','V1','VM-A1','DB-A','BIZ-A','U01','R01','SG01')").all().map(row => row.id);
     const placeholders = sampleNodes.length ? sampleNodes.map(() => '?').join(',') : "''";
     const tx = this._db.transaction(() => {
       if (sampleNodes.length) {
-        this._db.prepare(`DELETE FROM edges WHERE from_id IN (${placeholders}) OR to_id IN (${placeholders})`).run(...sampleNodes, ...sampleNodes);
-        this._db.prepare(`DELETE FROM nodes WHERE id IN (${placeholders})`).run(...sampleNodes);
+        this._db.prepare('DELETE FROM edges WHERE from_id IN (' + placeholders + ') OR to_id IN (' + placeholders + ')').run(...sampleNodes, ...sampleNodes);
+        this._db.prepare('DELETE FROM nodes WHERE id IN (' + placeholders + ')').run(...sampleNodes);
       }
       this._db.prepare("DELETE FROM risks WHERE project_id='PRJ-DEMO-001'").run();
-      this._db.prepare("DELETE FROM followups WHERE project_id='PRJ-DEMO-001' AND (slot LIKE 'edge:E08%' OR title LIKE '历史权限关系%')").run();
-      this._db.prepare("DELETE FROM remediation_tasks WHERE project_id='PRJ-DEMO-001' AND title LIKE '升级 V1%'").run();
-      this._db.prepare("DELETE FROM evidence WHERE project_id='PRJ-DEMO-001' AND (id IN ('EV-001','EV-002','EV-003') OR source LIKE '漏洞扫描平台 %' OR source LIKE '业务说明文档 %' OR source LIKE '权限审计平台 %')").run();
-      this._db.prepare("DELETE FROM followups WHERE project_id='PRJ-DEMO-001' AND id='FU-001'").run();
-      this._db.prepare("DELETE FROM remediation_tasks WHERE project_id='PRJ-DEMO-001' AND id='TASK-001'").run();
-      this._db.prepare("UPDATE projects SET name='跨层风险穿透评估项目',scope='待从 Excel 图谱或证据材料导入评估范围',status='draft',updated_at=? WHERE id='PRJ-DEMO-001'").run(this.now());
-      this._db.prepare('INSERT INTO audit_logs (project_id,action,detail,actor,created_at) VALUES (?,?,?,?,?)').run('PRJ-DEMO-001', 'remove_demo_seed', '已清理内置演示资产，等待导入真实评估材料', 'system', this.now());
+      this._db.prepare("DELETE FROM evidence WHERE project_id='PRJ-DEMO-001' AND (filename LIKE '%漏洞扫描%' OR filename LIKE '%业务说明%' OR filename LIKE '%权限审计%' OR source LIKE '漏洞扫描平台 %' OR source LIKE '业务说明文档 %' OR source LIKE '权限审计平台 %')").run();
+      this._db.prepare("DELETE FROM followups WHERE project_id='PRJ-DEMO-001' AND (id='FU-001' OR slot LIKE 'edge:E08%' OR title LIKE '历史权限关系%')").run();
+      this._db.prepare("DELETE FROM remediation_tasks WHERE project_id='PRJ-DEMO-001' AND (id='TASK-001' OR title LIKE '升级 V1%')").run();
+      this._db.prepare("UPDATE projects SET name='跨层风险穿透评估项目',scope='待从 Excel 图谱或证据材料导入评估范围',status='draft',updated_at=? WHERE id='PRJ-DEMO-001' AND (name='政务云跨层风险穿透评估演示' OR scope LIKE '平台侧基础设施%')").run(this.now());
     });
     tx();
   }
