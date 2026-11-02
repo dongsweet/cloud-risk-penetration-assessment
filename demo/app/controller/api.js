@@ -27,7 +27,10 @@ class ApiController extends Controller {
 
   async dashboard() {
     const db = this.service.db.db;
-    const project = this.service.db.project('PRJ-DEMO-001');
+    const requestedId = String(this.ctx.query.projectId || '').trim();
+    const project = requestedId ? this.service.db.project(requestedId) : this.service.db.listProjects()[0] ? this.service.db.project(this.service.db.listProjects()[0].id) : null;
+    const empty = { project: null, nodes: 0, edges: 0, evidence: 0, risks: 0, highRisks: 0, openFollowups: 0, openTasks: 0, hasSecurityAdmin: Boolean(db.prepare("SELECT 1 FROM app_users u JOIN app_user_roles r ON r.user_id=u.id WHERE u.status='ACTIVE' AND r.role_code='SECURITY_ADMIN' LIMIT 1").get()), llmConfigured: Boolean(this.service.db.systemConfig().llmBaseUrl && process.env.LLM_API_KEY && this.service.db.systemConfig().llmModel), riskConfig: null, modelName: this.service.db.systemConfig().llmModel || '' };
+    if (!project) { ok(this.ctx, empty); return; }
     ok(this.ctx, {
       project,
       nodes: db.prepare('SELECT COUNT(*) AS n FROM nodes WHERE project_id=?').get(project.id).n,
@@ -37,10 +40,10 @@ class ApiController extends Controller {
       highRisks: db.prepare("SELECT COUNT(*) AS n FROM risks WHERE project_id=? AND level IN ('高','很高')").get(project.id).n,
       openFollowups: db.prepare("SELECT COUNT(*) AS n FROM followups WHERE project_id=? AND status='open'").get(project.id).n,
       openTasks: db.prepare("SELECT COUNT(*) AS n FROM remediation_tasks WHERE project_id=? AND status='open'").get(project.id).n,
-      hasSecurityAdmin: Boolean(db.prepare("SELECT 1 FROM app_users u JOIN app_user_roles r ON r.user_id=u.id WHERE u.status='ACTIVE' AND r.role_code='SECURITY_ADMIN' LIMIT 1").get()),
-      llmConfigured: Boolean(this.service.db.systemConfig().llmBaseUrl && process.env.LLM_API_KEY && this.service.db.systemConfig().llmModel),
+      hasSecurityAdmin: empty.hasSecurityAdmin,
+      llmConfigured: empty.llmConfigured,
       riskConfig: this.service.risk.getConfig(project.id),
-      modelName: this.service.db.systemConfig().llmModel || ''
+      modelName: empty.modelName
     });
   }
 
@@ -151,10 +154,13 @@ class ApiController extends Controller {
 
   async createProject() {
     const input = body(this.ctx);
+    const name = String(input.name || '').trim().slice(0, 120);
+    if (!name) this.ctx.throw(400, '项目名称不能为空');
+    const scope = String(input.scope || '待填写评估范围').trim().slice(0, 500);
     const now = this.service.db.now();
-    const project = { id: id('PRJ'), name: input.name || '未命名评估项目', scope: input.scope || '待补充评估范围', status: 'draft', created_at: now, updated_at: now };
+    const project = { id: id('PRJ'), name, scope, status: 'draft', created_at: now, updated_at: now };
     this.service.db.db.prepare('INSERT INTO projects (id,name,scope,status,created_at,updated_at) VALUES (@id,@name,@scope,@status,@created_at,@updated_at)').run(project);
-    this.service.db.audit(project.id, 'create_project', project.name);
+    this.service.db.audit(project.id, 'create_project', project.name, this.ctx.state.user?.username || 'system');
     this.ctx.status = 201;
     ok(this.ctx, project);
   }

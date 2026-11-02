@@ -13,7 +13,7 @@ const OPERATOR_SCOPES = Object.freeze({
 });
 
 const ROLE_PERMISSIONS = Object.freeze({
-  SYSTEM_ADMIN: [ 'dashboard.read', 'business.read', 'report.read', 'system.config.read', 'system.config.write', 'risk.config.write' ],
+  SYSTEM_ADMIN: [ 'dashboard.read', 'business.read', 'report.read', 'system.config.read', 'system.config.write', 'risk.config.write', 'project.write' ],
   SECURITY_ADMIN: [ 'dashboard.read', 'business.read', 'report.read', 'users.admin' ],
   OPERATOR: [ 'dashboard.read', 'business.read', 'report.read' ],
   AUDITOR: [ 'dashboard.read', 'business.read', 'report.read', 'audit.read' ]
@@ -24,7 +24,7 @@ function hasPermission(user, permission) {
   for (const role of user.roles || []) {
     if ((ROLE_PERMISSIONS[role] || []).includes(permission)) return true;
     if (role === 'SYSTEM_ADMIN' && permission === 'risk.config.write') return true;
-    if (role === 'OPERATOR' && user.scopes?.includes('assess') && [ 'evidence.write', 'assessment.write', 'risk.config.write' ].includes(permission)) return true;
+    if (role === 'OPERATOR' && user.scopes?.includes('assess') && [ 'evidence.write', 'assessment.write', 'risk.config.write', 'project.write' ].includes(permission)) return true;
     if (role === 'OPERATOR' && user.scopes?.includes('review') && permission === 'review.write') return true;
   }
   return false;
@@ -38,7 +38,7 @@ function permissionFor(method, pathname) {
   if (pathname === '/api/v1/users' || /^\/api\/v1\/users\/[^/]+(?:\/password)?$/.test(pathname)) return 'users.admin';
   if (pathname.startsWith('/api/v1/audit/') || pathname === '/api/v1/auth-events') return 'audit.read';
   if (pathname.startsWith('/api/v1/report/')) return 'report.read';
-  if (pathname === '/api/v1/projects') return method === 'POST' ? 'assessment.write' : 'business.read';
+  if (pathname === '/api/v1/projects') return method === 'POST' ? 'project.write' : 'business.read';
   if (/^\/api\/v1\/risks\/[^/]+\/config$/.test(pathname)) return 'risk.config.write';
   if (pathname.startsWith('/api/v1/projects/') || pathname.startsWith('/api/v1/graph/') || pathname.startsWith('/api/v1/evidence/') || pathname.startsWith('/api/v1/risks/') || pathname.startsWith('/api/v1/reviews/') || pathname.startsWith('/api/v1/followups/') || pathname.startsWith('/api/v1/tasks/')) {
     if (method === 'GET') return 'business.read';

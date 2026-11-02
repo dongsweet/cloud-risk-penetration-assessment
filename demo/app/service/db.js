@@ -60,8 +60,6 @@ class DbService extends Service {
     ensureColumn('risks', 'config_json', "TEXT DEFAULT '{}'");
     this.seedAccessControl();
     this.seedSystemConfig();
-    const count = this._db.prepare('SELECT COUNT(*) AS n FROM projects').get().n;
-    if (!count) this.seedEmpty();
   }
 
   seedAccessControl() {
@@ -80,22 +78,16 @@ class DbService extends Service {
     if (!current) this._db.prepare('INSERT INTO system_settings (setting_key,value_json,updated_by,updated_at) VALUES (?,?,?,?)').run('system', JSON.stringify(DEFAULT_SYSTEM_CONFIG), 'system', this.now());
   }
 
-  seedEmpty() {
-    const timestamp = this.now();
-    this._db.prepare('INSERT INTO projects (id,name,scope,status,created_at,updated_at) VALUES (?,?,?,?,?,?)').run('PRJ-DEMO-001', '跨层风险穿透评估项目', '待从 Excel 图谱或证据材料导入评估范围', 'draft', timestamp, timestamp);
-    this._db.prepare('INSERT INTO audit_logs (project_id,action,detail,actor,created_at) VALUES (?,?,?,?,?)').run('PRJ-DEMO-001', 'initialize_project', '创建空评估项目，等待导入资产图谱', 'system', timestamp);
-  }
-
   now() { return new Date().toISOString(); }
   project(id) { const p = this.db.prepare('SELECT * FROM projects WHERE id=?').get(id); return p ? { ...p, risk_config: JSON.parse(p.risk_config_json || '{}') } : null; }
-  listProjects() { return this.db.prepare('SELECT p.*, (SELECT COUNT(*) FROM nodes n WHERE n.project_id=p.id) node_count, (SELECT COUNT(*) FROM risks r WHERE r.project_id=p.id) risk_count FROM projects p ORDER BY updated_at DESC').all(); }
+  listProjects() { return this.db.prepare('SELECT p.*, (SELECT COUNT(*) FROM nodes n WHERE n.project_id=p.id) node_count, (SELECT COUNT(*) FROM edges e WHERE e.project_id=p.id) edge_count, (SELECT COUNT(*) FROM evidence v WHERE v.project_id=p.id) evidence_count, (SELECT COUNT(*) FROM risks r WHERE r.project_id=p.id) risk_count, (SELECT COUNT(*) FROM followups f WHERE f.project_id=p.id AND f.status=\'open\') open_followup_count FROM projects p ORDER BY updated_at DESC').all(); }
   nodes(projectId) { return this.db.prepare('SELECT * FROM nodes WHERE project_id=? ORDER BY layer, id').all(projectId).map(n => ({ ...n, meta: JSON.parse(n.meta_json || '{}') })); }
   edges(projectId) { return this.db.prepare('SELECT * FROM edges WHERE project_id=? ORDER BY id').all(projectId).map(e => ({ ...e, factors: JSON.parse(e.factors_json || '{}'), active: !!e.active })); }
   evidence(projectId) { return this.db.prepare('SELECT id,project_id,filename,type,status,extraction_json,source,confidence,error,created_at,CASE WHEN LENGTH(TRIM(content))>0 THEN 1 ELSE 0 END AS has_content FROM evidence WHERE project_id=? ORDER BY created_at DESC').all(projectId).map(e => ({ ...e, extraction: JSON.parse(e.extraction_json || '{}') })); }
   risks(projectId) { return this.db.prepare('SELECT * FROM risks WHERE project_id=? ORDER BY risk_value DESC, created_at DESC').all(projectId).map(r => ({ ...r, path: JSON.parse(r.path_json || '[]'), factors: JSON.parse(r.factors_json || '{}'), config: JSON.parse(r.config_json || '{}'), valid: !!r.valid })); }
   followups(projectId) { return this.db.prepare('SELECT * FROM followups WHERE project_id=? ORDER BY status DESC, created_at DESC').all(projectId); }
   reviews(projectId) { return this.db.prepare('SELECT * FROM reviews WHERE project_id=? ORDER BY created_at DESC').all(projectId); }
-  audit(projectId, action, detail, actor = 'system') { this.db.prepare('INSERT INTO audit_logs (project_id,action,detail,actor,created_at) VALUES (?,?,?,?,?)').run(projectId, action, detail, actor, this.now()); }
+  audit(projectId, action, detail, actor = 'system') { const timestamp = this.now(); this.db.prepare('INSERT INTO audit_logs (project_id,action,detail,actor,created_at) VALUES (?,?,?,?,?)').run(projectId, action, detail, actor, timestamp); if (projectId) this.db.prepare('UPDATE projects SET updated_at=? WHERE id=?').run(timestamp, projectId); }
   systemConfig() {
     const row = this.db.prepare('SELECT value_json,updated_by,updated_at FROM system_settings WHERE setting_key=?').get('system');
     const value = row ? JSON.parse(row.value_json || '{}') : { ...DEFAULT_SYSTEM_CONFIG };
