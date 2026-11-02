@@ -89,7 +89,12 @@ function normalize(data, source = '上传文件') {
 }
 
 function importStructured(text, ext, source) {
-  if (ext === 'json') return normalize(JSON.parse(text), source);
+  if (ext === 'json') {
+    const data = JSON.parse(text);
+    const recognized = [ 'assets', 'nodes', 'relations', 'edges', 'risks' ].some(key => Object.prototype.hasOwnProperty.call(data || {}, key));
+    if (!recognized) throw new Error('JSON 未匹配图谱字段，将作为文本材料等待模型抽取');
+    return normalize(data, source);
+  }
   if (ext !== 'csv') return null;
   const rows = parseCsv(text);
   const headers = new Set(Object.keys(rows[0] || {}));
@@ -149,4 +154,37 @@ async function importExcel(file, source) {
   return normalize({ assets, relations, risks, questions: [] }, source);
 }
 
-module.exports = { normalize, parseCsv, importStructured, importExcel, RELATIONS, LAYERS, TYPES, FACTORS };
+// A workbook is a graph import template only when it has the three canonical
+// graph sheets. Ordinary CMDB, virtualization and audit workbooks must remain
+// source evidence so that the configured LLM can extract candidates from them.
+async function isGraphTemplate(file) {
+  let ExcelJS;
+  try { ExcelJS = require('exceljs'); } catch (_) { throw new Error('服务器未安装 Excel 导入组件，请重新构建 Docker 镜像'); }
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.readFile(file);
+  const names = new Set(workbook.worksheets.map(sheet => String(sheet.name).trim().toLowerCase()));
+  const hasAssets = [ 'assets', 'nodes', '资产节点', '资产', '节点' ].some(name => names.has(name));
+  const hasRelations = [ 'relations', 'edges', '关系边', '关系', '边' ].some(name => names.has(name));
+  const hasRisks = [ 'risks', 'risk', '风险源', '风险' ].some(name => names.has(name));
+  return hasAssets && hasRelations && hasRisks;
+}
+
+// Convert a non-template workbook into bounded, labelled text for LLM
+// extraction. Sheet names and headers are retained for source traceability.
+async function extractExcelText(file, maxChars = 100000) {
+  let ExcelJS;
+  try { ExcelJS = require('exceljs'); } catch (_) { throw new Error('服务器未安装 Excel 导入组件，请重新构建 Docker 镜像'); }
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.readFile(file);
+  const lines = [];
+  for (const sheet of workbook.worksheets) {
+    lines.push(`【工作表】${sheet.name}`);
+    sheet.eachRow({ includeEmpty: false }, row => {
+      const values = row.values.slice(1).map(cellText);
+      if (values.some(Boolean)) lines.push(values.join(' | '));
+    });
+  }
+  return lines.join('\n').slice(0, maxChars);
+}
+
+module.exports = { normalize, parseCsv, importStructured, importExcel, isGraphTemplate, extractExcelText, RELATIONS, LAYERS, TYPES, FACTORS };

@@ -199,11 +199,11 @@ class ApiController extends Controller {
     const target = path.join(uploadDir, safeName);
     fs.copyFileSync(file.filepath, target);
     const extension = path.extname(file.filename).slice(1).toLowerCase();
-    if (extension === 'xlsx') {
-      const evidence = { id: id('EV'), project_id: projectId, filename: file.filename, type: extension, content: '', status: 'pending', extraction_json: '{}', source: `Excel 图谱导入：${file.filename}`, confidence: 0, created_at: this.service.db.now() };
+    if (extension === 'xlsx' && await evidenceTools.isGraphTemplate(target)) {
+      const evidence = { id: id('EV'), project_id: projectId, filename: file.filename, type: extension, content: '', status: 'pending', extraction_json: '{}', source: `Excel 图谱模板导入：${file.filename}`, confidence: 0, created_at: this.service.db.now() };
       this.service.db.db.prepare('INSERT INTO evidence (id,project_id,filename,type,content,status,extraction_json,source,confidence,created_at) VALUES (@id,@project_id,@filename,@type,@content,@status,@extraction_json,@source,@confidence,@created_at)').run(evidence);
       try {
-        const extraction = await evidenceTools.importExcel(target, `Excel 图谱导入：${file.filename}`);
+        const extraction = await evidenceTools.importExcel(target, `Excel 图谱模板导入：${file.filename}`);
         this.applyExtraction(projectId, evidence.id, extraction);
         this.service.db.db.prepare("UPDATE evidence SET status='extracted',extraction_json=?,confidence=?,error=NULL WHERE id=?").run(JSON.stringify(extraction), .9, evidence.id);
         evidence.status = 'extracted'; evidence.extraction_json = JSON.stringify(extraction); evidence.confidence = .9;
@@ -218,7 +218,11 @@ class ApiController extends Controller {
     }
     let content = '';
     let readError = '';
-    try { content = await this.readEvidence(target, file.filename); } catch (err) { readError = `文本提取失败：${err.message}`; }
+    try {
+      content = extension === 'xlsx'
+        ? await evidenceTools.extractExcelText(target)
+        : await this.readEvidence(target, file.filename);
+    } catch (err) { readError = `文本提取失败：${err.message}`; }
     if (!String(content || '').trim() && !readError) readError = '未能从文件中提取文本，扫描版 PDF 或空白文件需要提供可检索文本版本';
     const evidence = { id: id('EV'), project_id: projectId, filename: file.filename, type: path.extname(file.filename).slice(1).toLowerCase() || 'unknown', content: String(content || '').slice(0, 100000), status: 'pending', extraction_json: '{}', source: `上传文件：${file.filename}`, confidence: 0, created_at: this.service.db.now() };
     this.service.db.db.prepare('INSERT INTO evidence (id,project_id,filename,type,content,status,extraction_json,source,confidence,created_at) VALUES (@id,@project_id,@filename,@type,@content,@status,@extraction_json,@source,@confidence,@created_at)').run(evidence);
@@ -234,8 +238,8 @@ class ApiController extends Controller {
         evidence.extraction = extraction;
         this.service.db.db.prepare('UPDATE evidence SET status=?,extraction_json=?,confidence=? WHERE id=?').run(evidence.status, evidence.extraction_json, evidence.confidence, evidence.id);
       } catch (err) {
-        evidence.error = err.message;
-        this.service.db.db.prepare('UPDATE evidence SET error=? WHERE id=?').run(err.message, evidence.id);
+        evidence.error = `未匹配图谱字段，已保留为模型材料：${err.message}`;
+        this.service.db.db.prepare('UPDATE evidence SET error=? WHERE id=?').run(evidence.error, evidence.id);
       }
     }
     ok(ctx, { ...evidence, extraction: evidence.extraction || {} });
@@ -284,7 +288,12 @@ class ApiController extends Controller {
     const lowConfidence = this.service.db.systemConfig().lowConfidenceThreshold;
     const upsertNode = db.prepare(`INSERT INTO nodes (id,project_id,name,kind,layer,tenant,pool,value,importance,sensitivity,availability,impact,risk_source,risk_name,probability,description,meta_json)
       VALUES (@id,@project_id,@name,@kind,@layer,@tenant,@pool,@value,@importance,@sensitivity,@availability,@impact,@risk_source,@risk_name,@probability,@description,@meta_json)
-      ON CONFLICT(id) DO NOTHING`);
+      ON CONFLICT(id) DO UPDATE SET
+        value=CASE WHEN nodes.value=0 AND excluded.value>0 THEN excluded.value ELSE nodes.value END,
+        importance=CASE WHEN nodes.importance=0 AND excluded.importance>0 THEN excluded.importance ELSE nodes.importance END,
+        sensitivity=CASE WHEN nodes.sensitivity=0 AND excluded.sensitivity>0 THEN excluded.sensitivity ELSE nodes.sensitivity END,
+        availability=CASE WHEN nodes.availability=0 AND excluded.availability>0 THEN excluded.availability ELSE nodes.availability END,
+        impact=CASE WHEN nodes.impact=0 AND excluded.impact>0 THEN excluded.impact ELSE nodes.impact END`);
     const insertEdge = db.prepare(`INSERT INTO edges (id,project_id,from_id,to_id,relation,active,source,confidence,factors_json,valid_from,valid_to)
       VALUES (@id,@project_id,@from_id,@to_id,@relation,@active,@source,@confidence,@factors_json,@valid_from,@valid_to)
       ON CONFLICT(id) DO NOTHING`);
