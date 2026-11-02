@@ -1,0 +1,302 @@
+'use strict';
+
+const Controller = require('egg').Controller;
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+const mammoth = require('mammoth');
+const PDFDocument = require('pdfkit');
+const evidenceTools = require('../lib/evidence');
+
+function id(prefix) { return `${prefix}-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`; }
+function body(ctx) {
+  if (ctx.request.body && typeof ctx.request.body === 'object') return ctx.request.body;
+  return {};
+}
+function ok(ctx, data) { ctx.body = { ok: true, data }; }
+function json(value) { try { return JSON.parse(value); } catch (_) { return {}; } }
+
+class ApiController extends Controller {
+  async health() {
+    const db = this.service.db.db;
+    this.ctx.body = { ok: true, service: 'cloud-risk-penetration-demo', time: new Date().toISOString(), database: !!db, llmConfigured: !!(process.env.LLM_BASE_URL && process.env.LLM_API_KEY && process.env.LLM_MODEL) };
+  }
+
+  async dashboard() {
+    const db = this.service.db.db;
+    const project = this.service.db.project('PRJ-DEMO-001');
+    ok(this.ctx, {
+      project,
+      nodes: db.prepare('SELECT COUNT(*) AS n FROM nodes WHERE project_id=?').get(project.id).n,
+      edges: db.prepare('SELECT COUNT(*) AS n FROM edges WHERE project_id=?').get(project.id).n,
+      evidence: db.prepare('SELECT COUNT(*) AS n FROM evidence WHERE project_id=?').get(project.id).n,
+      risks: db.prepare('SELECT COUNT(*) AS n FROM risks WHERE project_id=?').get(project.id).n,
+      highRisks: db.prepare("SELECT COUNT(*) AS n FROM risks WHERE project_id=? AND level IN ('高','很高')").get(project.id).n,
+      openFollowups: db.prepare("SELECT COUNT(*) AS n FROM followups WHERE project_id=? AND status='open'").get(project.id).n,
+      openTasks: db.prepare("SELECT COUNT(*) AS n FROM remediation_tasks WHERE project_id=? AND status='open'").get(project.id).n,
+      llmConfigured: !!(process.env.LLM_BASE_URL && process.env.LLM_API_KEY && process.env.LLM_MODEL),
+      riskConfig: this.service.risk.getConfig(project.id),
+      modelName: process.env.LLM_MODEL || ''
+    });
+  }
+
+  async projects() { ok(this.ctx, this.service.db.listProjects()); }
+
+  async createProject() {
+    const input = body(this.ctx);
+    const now = this.service.db.now();
+    const project = { id: id('PRJ'), name: input.name || '未命名评估项目', scope: input.scope || '待补充评估范围', status: 'draft', created_at: now, updated_at: now };
+    this.service.db.db.prepare('INSERT INTO projects (id,name,scope,status,created_at,updated_at) VALUES (@id,@name,@scope,@status,@created_at,@updated_at)').run(project);
+    this.service.db.audit(project.id, 'create_project', project.name);
+    this.ctx.status = 201;
+    ok(this.ctx, project);
+  }
+
+  async project() {
+    const project = this.service.db.project(this.ctx.params.id);
+    if (!project) this.ctx.throw(404, '评估项目不存在');
+    ok(this.ctx, { project, nodes: this.service.db.nodes(project.id), edges: this.service.db.edges(project.id), evidence: this.service.db.evidence(project.id), risks: this.service.db.risks(project.id), followups: this.service.db.followups(project.id), reviews: this.service.db.reviews(project.id) });
+  }
+
+  async graph() { ok(this.ctx, { nodes: this.service.db.nodes(this.ctx.params.projectId), edges: this.service.db.edges(this.ctx.params.projectId) }); }
+  async evidence() { ok(this.ctx, this.service.db.evidence(this.ctx.params.projectId)); }
+  async risks() { ok(this.ctx, this.service.db.risks(this.ctx.params.projectId)); }
+  async reviews() { ok(this.ctx, this.service.db.reviews(this.ctx.params.projectId)); }
+  async followups() { ok(this.ctx, this.service.db.followups(this.ctx.params.projectId)); }
+  async tasks() { ok(this.ctx, this.service.db.db.prepare('SELECT * FROM remediation_tasks WHERE project_id=? ORDER BY status, due_date').all(this.ctx.params.projectId)); }
+  async audit() { ok(this.ctx, this.service.db.db.prepare('SELECT * FROM audit_logs WHERE project_id=? ORDER BY created_at DESC LIMIT 100').all(this.ctx.params.projectId)); }
+  async updateTask() {
+    const task = this.service.db.db.prepare('SELECT * FROM remediation_tasks WHERE id=?').get(this.ctx.params.taskId);
+    if (!task) this.ctx.throw(404, '整改任务不存在');
+    const input = body(this.ctx);
+    const status = [ 'open', 'in_progress', 'done', 'blocked' ].includes(input.status) ? input.status : task.status;
+    this.service.db.db.prepare('UPDATE remediation_tasks SET status=? WHERE id=?').run(status, task.id);
+    this.service.db.audit(task.project_id, 'task_status', `${task.id} / ${status}`);
+    ok(this.ctx, this.service.db.db.prepare('SELECT * FROM remediation_tasks WHERE id=?').get(task.id));
+  }
+
+  async uploadEvidence() {
+    const ctx = this.ctx;
+    const projectId = ctx.params.projectId;
+    const file = (ctx.request.files || [])[0];
+    if (!file) ctx.throw(400, '请选择证据文件');
+    const uploadDir = process.env.UPLOAD_DIR || path.join(this.app.baseDir, 'uploads');
+    fs.mkdirSync(uploadDir, { recursive: true });
+    const safeName = `${Date.now()}-${path.basename(file.filename).replace(/[^\w.\-\u4e00-\u9fa5]/g, '_')}`;
+    const target = path.join(uploadDir, safeName);
+    fs.copyFileSync(file.filepath, target);
+    let content = '';
+    let readError = '';
+    try { content = await this.readEvidence(target, file.filename); } catch (err) { readError = `文本提取失败：${err.message}`; }
+    if (!String(content || '').trim() && !readError) readError = '未能从文件中提取文本，扫描版 PDF 或空白文件需要提供可检索文本版本';
+    const evidence = { id: id('EV'), project_id: projectId, filename: file.filename, type: path.extname(file.filename).slice(1).toLowerCase() || 'unknown', content: String(content || '').slice(0, 100000), status: 'pending', extraction_json: '{}', source: `上传文件：${file.filename}`, confidence: 0, created_at: this.service.db.now() };
+    this.service.db.db.prepare('INSERT INTO evidence (id,project_id,filename,type,content,status,extraction_json,source,confidence,created_at) VALUES (@id,@project_id,@filename,@type,@content,@status,@extraction_json,@source,@confidence,@created_at)').run(evidence);
+    if (readError) this.service.db.db.prepare('UPDATE evidence SET error=? WHERE id=?').run(readError, evidence.id);
+    this.service.db.audit(projectId, 'upload_evidence', file.filename);
+    if ([ 'csv', 'json' ].includes(evidence.type) && !readError) {
+      try {
+        const extraction = evidenceTools.importStructured(evidence.content, evidence.type, evidence.source);
+        this.applyExtraction(projectId, evidence.id, extraction);
+        evidence.status = 'extracted';
+        evidence.extraction_json = JSON.stringify(extraction);
+        evidence.confidence = .9;
+        evidence.extraction = extraction;
+        this.service.db.db.prepare('UPDATE evidence SET status=?,extraction_json=?,confidence=? WHERE id=?').run(evidence.status, evidence.extraction_json, evidence.confidence, evidence.id);
+      } catch (err) {
+        evidence.error = err.message;
+        this.service.db.db.prepare('UPDATE evidence SET error=? WHERE id=?').run(err.message, evidence.id);
+      }
+    }
+    ok(ctx, { ...evidence, extraction: evidence.extraction || {} });
+  }
+
+  async extractEvidence() {
+    const { projectId, evidenceId } = this.ctx.params;
+    const row = this.service.db.db.prepare('SELECT * FROM evidence WHERE id=? AND project_id=?').get(evidenceId, projectId);
+    if (!row) this.ctx.throw(404, '证据不存在');
+    if (!String(row.content || '').trim()) this.ctx.throw(422, row.error || '文件中没有可供模型分析的文本');
+    try {
+      const extraction = await this.service.llm.extract(row.content, row.filename);
+      this.applyExtraction(projectId, evidenceId, extraction);
+      const candidates = [ ...(extraction.assets || []), ...(extraction.relations || []), ...(extraction.risks || []) ];
+      const confidence = candidates.length ? Math.min(...candidates.map(x => Number(x.confidence ?? .8))) : .8;
+      this.service.db.db.prepare("UPDATE evidence SET status='extracted',extraction_json=?,confidence=?,error=NULL WHERE id=?").run(JSON.stringify(extraction), confidence, evidenceId);
+      this.service.db.audit(projectId, 'extract_evidence', `${row.filename} / ${process.env.LLM_MODEL}`);
+      ok(this.ctx, { status: 'extracted', extraction });
+    } catch (err) {
+      this.service.db.db.prepare("UPDATE evidence SET status='pending',error=? WHERE id=?").run(err.message, evidenceId);
+      this.service.db.audit(projectId, 'extract_evidence_failed', `${row.filename} / ${err.message}`);
+      this.ctx.status = 422;
+      this.ctx.body = { ok: false, error: err.message, data: { status: 'pending', retryable: true } };
+    }
+  }
+
+  async calculate() {
+    const result = this.service.risk.calculate(this.ctx.params.projectId, body(this.ctx));
+    ok(this.ctx, result);
+  }
+
+  async riskConfig() {
+    const projectId = this.ctx.params.projectId;
+    if (!this.service.db.project(projectId)) this.ctx.throw(404, '评估项目不存在');
+    try {
+      const config = require('../lib/risk-engine').mergeConfig({}, body(this.ctx));
+      this.service.db.db.prepare('UPDATE projects SET risk_config_json=?,updated_at=? WHERE id=?').run(JSON.stringify(config), this.service.db.now(), projectId);
+      this.service.db.audit(projectId, 'risk_config', '更新风险计算参数');
+      ok(this.ctx, config);
+    } catch (err) { this.ctx.throw(400, err.message); }
+  }
+
+  applyExtraction(projectId, evidenceId, extraction) {
+    const db = this.service.db.db;
+    const now = this.service.db.now();
+    const lowConfidence = .65;
+    const upsertNode = db.prepare(`INSERT INTO nodes (id,project_id,name,kind,layer,tenant,pool,value,importance,sensitivity,availability,impact,risk_source,risk_name,probability,description,meta_json)
+      VALUES (@id,@project_id,@name,@kind,@layer,@tenant,@pool,@value,@importance,@sensitivity,@availability,@impact,@risk_source,@risk_name,@probability,@description,@meta_json)
+      ON CONFLICT(id) DO NOTHING`);
+    const insertEdge = db.prepare(`INSERT INTO edges (id,project_id,from_id,to_id,relation,active,source,confidence,factors_json)
+      VALUES (@id,@project_id,@from_id,@to_id,@relation,@active,@source,@confidence,@factors_json)
+      ON CONFLICT(id) DO NOTHING`);
+    const tx = db.transaction(() => {
+      const extractedIds = new Set((extraction.assets || []).map(x => x.id));
+      for (const item of extraction.relations || []) {
+        const endpoints = db.prepare('SELECT id FROM nodes WHERE project_id=? AND id IN (?,?)').all(projectId, item.from, item.to).map(x => x.id);
+        if ((!endpoints.includes(item.from) && !extractedIds.has(item.from)) || (!endpoints.includes(item.to) && !extractedIds.has(item.to))) throw new Error(`关系 ${item.from} → ${item.to} 引用了未登记资产，已保留待处理`);
+      }
+      for (const item of extraction.assets || []) {
+        const valid = (v, fallback = 0) => { const n = Number(v ?? fallback); return Number.isFinite(n) && n >= 0 && n <= 1 ? n : fallback; };
+        const current = db.prepare('SELECT * FROM nodes WHERE id=? AND project_id=?').get(item.id, projectId);
+        const differs = current && ((item.name && current.name !== item.name) || (item.type && current.kind !== item.type) || (item.layer && current.layer !== item.layer) || [ 'value', 'importance', 'sensitivity', 'impact' ].some(k => item[k] !== undefined && Math.abs(Number(current[k] || 0) - Number(item[k])) > .01));
+        if (differs) db.prepare('INSERT INTO followups (id,project_id,slot,title,question,status,created_at) VALUES (?,?,?,?,?,?,?)').run(id('FU'), projectId, `asset:${item.id}:conflict`, '资产证据冲突待确认', `证据 ${evidenceId} 对资产 ${item.id} 的属性与当前图谱不一致，请确认采用值并补充依据。`, 'open', now);
+        upsertNode.run({ id: item.id, project_id: projectId, name: item.name || item.id, kind: item.type || 'other', layer: item.layer || 'tenant', tenant: item.tenant || '', pool: item.pool || '', value: valid(item.value), importance: valid(item.importance), sensitivity: valid(item.sensitivity), availability: valid(item.availability), impact: valid(item.impact), risk_source: 0, risk_name: '', probability: 0, description: item.description || '', meta_json: JSON.stringify({ source: item.source, confidence: item.confidence, evidenceId, extractedAt: extraction.extractedAt || now, reviewStatus: item.confidence < lowConfidence ? 'low_confidence_candidate' : 'candidate' }) });
+        if (Number(item.confidence) < lowConfidence) db.prepare('INSERT INTO followups (id,project_id,slot,title,question,status,created_at) VALUES (?,?,?,?,?,?,?)').run(id('FU'), projectId, `asset:${item.id}:confidence`, '低置信度资产待确认', `资产 ${item.id} 的抽取置信度为 ${item.confidence}，请确认资产标识、层级和属性。`, 'open', now);
+      }
+      for (const item of extraction.relations || []) {
+        const edgeId = item.id || `EDGE-${crypto.createHash('sha1').update(`${projectId}:${item.from}:${item.to}:${item.relation}`).digest('hex').slice(0, 12)}`;
+        const current = db.prepare('SELECT * FROM edges WHERE id=? AND project_id=?').get(edgeId, projectId);
+        if (current && !!current.active !== !!item.active) db.prepare('INSERT INTO followups (id,project_id,slot,title,question,status,created_at) VALUES (?,?,?,?,?,?,?)').run(id('FU'), projectId, `edge:${edgeId}:conflict`, '关系有效状态冲突待确认', `证据 ${evidenceId} 对关系 ${item.from} → ${item.to} 的有效状态与现有图谱不一致，请核实当前资源或权限状态。`, 'open', now);
+        if (Number(item.confidence) < lowConfidence) db.prepare('INSERT INTO followups (id,project_id,slot,title,question,status,created_at) VALUES (?,?,?,?,?,?,?)').run(id('FU'), projectId, `edge:${edgeId}:confidence`, '低置信度关系待确认', `关系 ${item.from} → ${item.to} 的抽取置信度为 ${item.confidence}，请确认关系类型、方向和有效状态。`, 'open', now);
+        insertEdge.run({ id: edgeId, project_id: projectId, from_id: item.from, to_id: item.to, relation: item.relation, active: item.active && Number(item.confidence) >= lowConfidence ? 1 : 0, source: item.source || `证据 ${evidenceId}`, confidence: Number(item.confidence || .75), factors_json: JSON.stringify(item.factors || {}) });
+      }
+      for (const risk of extraction.risks || []) {
+        const nodeId = risk.node_id || risk.asset_id || risk.assetId;
+        if (nodeId) db.prepare('UPDATE nodes SET risk_source=1,risk_name=?,probability=? WHERE id=? AND project_id=?').run(risk.name, Number(risk.probability || .3), nodeId, projectId);
+      }
+      for (let i = 0; i < (extraction.questions || []).length; i++) {
+        const question = typeof extraction.questions[i] === 'string' ? extraction.questions[i] : extraction.questions[i].question;
+        if (!question) continue;
+        db.prepare('INSERT INTO followups (id,project_id,slot,title,question,status,created_at) VALUES (?,?,?,?,?,?,?)').run(id('FU'), projectId, `evidence:${evidenceId}:question:${i + 1}`, '证据抽取待确认', question, 'open', now);
+      }
+    });
+    tx();
+  }
+
+  async review() {
+    const input = body(this.ctx);
+    const risk = this.service.db.db.prepare('SELECT * FROM risks WHERE id=?').get(this.ctx.params.reviewId);
+    if (!risk) this.ctx.throw(404, '风险项不存在');
+    const field = input.field || 'risk_value';
+    if (![ 'level', 'risk_value' ].includes(field)) this.ctx.throw(400, '不支持的复核字段');
+    if (field === 'level' && ![ '很低', '低', '中', '高', '很高' ].includes(input.afterValue)) this.ctx.throw(400, '风险等级无效');
+    if (field === 'risk_value' && (!Number.isFinite(Number(input.afterValue)) || Number(input.afterValue) < 0 || Number(input.afterValue) > 1)) this.ctx.throw(400, '风险值必须在 0 到 1 之间');
+    const review = { id: id('REV'), project_id: risk.project_id, risk_id: risk.id, field, before_value: String(input.beforeValue ?? ''), after_value: String(input.afterValue ?? ''), reason: input.reason || '人工复核修订', reviewer: input.reviewer || '复核人员', created_at: this.service.db.now() };
+    this.service.db.db.prepare('INSERT INTO reviews (id,project_id,risk_id,field,before_value,after_value,reason,reviewer,created_at) VALUES (@id,@project_id,@risk_id,@field,@before_value,@after_value,@reason,@reviewer,@created_at)').run(review);
+    if (field === 'level') this.service.db.db.prepare('UPDATE risks SET level=? WHERE id=?').run(input.afterValue, risk.id);
+    if (field === 'risk_value') {
+      const value = Number(input.afterValue);
+      const thresholds = this.service.risk.getConfig(risk.project_id).thresholds;
+      const level = require('../lib/risk-engine').level(value, thresholds);
+      this.service.db.db.prepare('UPDATE risks SET risk_value=?,level=? WHERE id=?').run(value, level, risk.id);
+    }
+    this.service.db.audit(risk.project_id, 'review_writeback', `${risk.id} / ${review.field}`);
+    ok(this.ctx, review);
+  }
+
+  async answerFollowup() {
+    const input = body(this.ctx);
+    const followup = this.service.db.db.prepare('SELECT * FROM followups WHERE id=?').get(this.ctx.params.followupId);
+    if (!followup) this.ctx.throw(404, '追问不存在');
+    if (!input.answer) this.ctx.throw(400, '请输入回答');
+    this.service.db.setFollowup(followup.id, input.answer);
+    const match = /^edge:([^:.]+)/.exec(followup.slot || '');
+    let recalculated = null;
+    if (match) {
+      const answer = String(input.answer).toLowerCase();
+      const negative = /(无效|失效|不可达|撤销|不再有效|不是)/.test(answer);
+      const positive = !negative && /(仍然有效|仍有效|当前有效|是有效|可达|恢复|保留|有效)/.test(answer);
+      if (negative !== positive) {
+        this.service.db.db.prepare('UPDATE edges SET active=? WHERE id=? AND project_id=?').run(positive ? 1 : 0, match[1], followup.project_id);
+        recalculated = this.service.risk.calculate(followup.project_id);
+      }
+    }
+    this.service.db.audit(followup.project_id, 'followup_answer', `${followup.slot} / ${input.answer}`);
+    ok(this.ctx, { followup: this.service.db.db.prepare('SELECT * FROM followups WHERE id=?').get(followup.id), recalculated: recalculated ? { count: recalculated.count } : null });
+  }
+
+  async regenerateFollowup() {
+    const followup = this.service.db.db.prepare('SELECT * FROM followups WHERE id=?').get(this.ctx.params.followupId);
+    if (!followup) this.ctx.throw(404, '追问不存在');
+    try {
+      const question = await this.service.llm.question(followup.slot, { title: followup.title, currentQuestion: followup.question });
+      if (!question.trim()) throw new Error('模型未生成有效追问');
+      this.service.db.db.prepare('UPDATE followups SET question=? WHERE id=?').run(question.trim(), followup.id);
+      this.service.db.audit(followup.project_id, 'followup_generated', `${followup.slot} / ${process.env.LLM_MODEL}`);
+      ok(this.ctx, this.service.db.db.prepare('SELECT * FROM followups WHERE id=?').get(followup.id));
+    } catch (err) {
+      this.ctx.status = 422;
+      this.ctx.body = { ok: false, error: `真实模型追问生成失败：${err.message}` };
+    }
+  }
+
+  async report() {
+    const projectId = this.ctx.params.projectId;
+    const project = this.service.db.project(projectId);
+    if (!project) this.ctx.throw(404, '评估项目不存在');
+    ok(this.ctx, { generatedAt: new Date().toISOString(), project, risks: this.service.db.risks(projectId), evidence: this.service.db.evidence(projectId), reviews: this.service.db.reviews(projectId), tasks: this.service.db.db.prepare('SELECT * FROM remediation_tasks WHERE project_id=?').all(projectId), formula: 'S=w1C+w2N+w3P+w4R+w5E+w6B-w7I; Tp=S+w7; Pt=min(1,Pp*(1+αTp)); Lt=λ1Av+λ2K+λ3D+λ4Ic; Rt=Pt*Lt' });
+  }
+
+  async reportPdf() {
+    const projectId = this.ctx.params.projectId;
+    const project = this.service.db.project(projectId);
+    if (!project) this.ctx.throw(404, '评估项目不存在');
+    const risks = this.service.db.risks(projectId);
+    const doc = new PDFDocument({ margin: 48, size: 'A4' });
+    this.ctx.type = 'application/pdf';
+    this.ctx.set('Content-Disposition', `attachment; filename="risk-report-${projectId}.pdf"`);
+    this.ctx.body = doc;
+    const font = '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc';
+    // Noto CJK is a TrueType collection; pass the face name so fontkit
+    // selects a concrete face instead of treating the collection itself as a font.
+    if (fs.existsSync(font)) doc.font(font, 'NotoSansCJKsc-Regular');
+    doc.fontSize(20).text('云计算跨层风险穿透评估报告', { align: 'center' }).moveDown();
+    doc.fontSize(11).text(`项目：${project.name}`).text(`范围：${project.scope}`).text(`生成时间：${new Date().toLocaleString('zh-CN')}`).moveDown();
+    doc.fontSize(14).text('评估结论').moveDown(.4);
+    if (!risks.length) doc.fontSize(11).text('尚未生成风险结果，请在系统中执行计算。');
+    risks.forEach((r, i) => {
+      doc.fontSize(12).text(`${i + 1}. ${r.level}风险｜${r.source_id} → ${r.target_id}`);
+      doc.fontSize(10).text(`路径：${r.path.nodes.join(' → ')}\n穿透评分：${r.penetration.toFixed(3)}｜租户风险值：${r.risk_value.toFixed(3)}\n依据：${r.reason}`).moveDown(.5);
+    });
+    doc.moveDown().fontSize(9).text('计算公式：S=w1C+w2N+w3P+w4R+w5E+w6B-w7I；Tp=S+w7；Pt=min(1,Pp×(1+αTp))；Lt=λ1Av+λ2K+λ3D+λ4Ic；Rt=Pt×Lt。');
+    doc.end();
+  }
+
+  async readEvidence(file, originalName) {
+    const ext = path.extname(originalName).toLowerCase();
+    if (ext === '.docx') return (await mammoth.extractRawText({ path: file })).value;
+    if (ext === '.pdf') {
+      try {
+        const { PDFParse } = require('pdf-parse');
+        if (PDFParse) {
+          const parser = new PDFParse({ data: fs.readFileSync(file) });
+          try { return (await parser.getText()).text || ''; } finally { await parser.destroy(); }
+        }
+        const mod = require('pdf-parse');
+        const result = await (typeof mod === 'function' ? mod : mod.default)(fs.readFileSync(file));
+        return result.text || '';
+      } catch (err) { throw new Error(`PDF 文本提取失败：${err.message}`); }
+    }
+    return fs.readFileSync(file, 'utf8');
+  }
+}
+
+module.exports = ApiController;

@@ -1,0 +1,34 @@
+{
+  "name": "cloud-risk-penetration-demo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "云计算跨层风险穿透评估演示系统",
+  "scripts": {
+    "start": "egg-scripts start --framework=./framework --workers=2 --daemon --title=cloud-risk-demo",
+    "dev": "egg-bin dev",
+    "stop": "egg-scripts stop --title=cloud-risk-demo",
+    "debug": "egg-scripts start --framework=./framework --workers=2 --inspect --title=cloud-risk-demo",
+    "lint": "node --check app/router.js && node --check app/service/risk.js && node --check app/controller/api.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "admin-lte": "^4.2.0",
+    "bootstrap": "^5.3.8",
+    "better-sqlite3": "^13.0.3",
+    "bootstrap-icons": "^1.13.1",
+    "dotenv": "^16.4.7",
+    "egg": "^4.2.0",
+    "egg-scripts": "^3.1.0",
+    "@eggjs/multipart": "^5.1.0",
+    "@eggjs/static": "^4.1.0",
+    "mammoth": "^1.13.0",
+    "pdf-parse": "^2.4.5",
+    "pdfkit": "^0.20.2"
+  },
+  "devDependencies": {
+    "egg-bin": "^6.0.0"
+  },
+  "engines": {
+    "node": ">=22.18.0"
+  }
+}

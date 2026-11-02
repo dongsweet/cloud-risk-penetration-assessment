@@ -1,0 +1,7 @@
+demo/.env
+demo/node_modules/
+demo/data/*.db
+demo/data/tmp/
+demo/uploads/*
+!demo/uploads/.gitkeep
+demo/logs/
