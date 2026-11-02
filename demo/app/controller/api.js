@@ -7,6 +7,7 @@ const crypto = require('crypto');
 const mammoth = require('mammoth');
 const PDFDocument = require('pdfkit');
 const evidenceTools = require('../lib/evidence');
+const { cookie } = require('../middleware/authorize');
 
 function id(prefix) { return `${prefix}-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`; }
 function body(ctx) {
@@ -19,7 +20,8 @@ function json(value) { try { return JSON.parse(value); } catch (_) { return {}; 
 class ApiController extends Controller {
   async health() {
     const db = this.service.db.db;
-    this.ctx.body = { ok: true, service: 'cloud-risk-penetration-demo', time: new Date().toISOString(), database: !!db, llmConfigured: !!(process.env.LLM_BASE_URL && process.env.LLM_API_KEY && process.env.LLM_MODEL) };
+    const config = this.service.db.systemConfig();
+    this.ctx.body = { ok: true, service: 'cloud-risk-penetration-demo', time: new Date().toISOString(), database: !!db, llmConfigured: Boolean(config.llmBaseUrl && process.env.LLM_API_KEY && config.llmModel) };
   }
 
   async dashboard() {
@@ -34,10 +36,92 @@ class ApiController extends Controller {
       highRisks: db.prepare("SELECT COUNT(*) AS n FROM risks WHERE project_id=? AND level IN ('高','很高')").get(project.id).n,
       openFollowups: db.prepare("SELECT COUNT(*) AS n FROM followups WHERE project_id=? AND status='open'").get(project.id).n,
       openTasks: db.prepare("SELECT COUNT(*) AS n FROM remediation_tasks WHERE project_id=? AND status='open'").get(project.id).n,
-      llmConfigured: !!(process.env.LLM_BASE_URL && process.env.LLM_API_KEY && process.env.LLM_MODEL),
+      hasSecurityAdmin: Boolean(db.prepare("SELECT 1 FROM app_users u JOIN app_user_roles r ON r.user_id=u.id WHERE u.status='ACTIVE' AND r.role_code='SECURITY_ADMIN' LIMIT 1").get()),
+      llmConfigured: Boolean(this.service.db.systemConfig().llmBaseUrl && process.env.LLM_API_KEY && this.service.db.systemConfig().llmModel),
       riskConfig: this.service.risk.getConfig(project.id),
-      modelName: process.env.LLM_MODEL || ''
+      modelName: this.service.db.systemConfig().llmModel || ''
     });
+  }
+
+  async authStatus() {
+    ok(this.ctx, { initialized: this.service.db.db.prepare('SELECT COUNT(*) AS n FROM app_users').get().n > 0 });
+  }
+
+  async authSetup() {
+    if (this.service.db.db.prepare('SELECT COUNT(*) AS n FROM app_users').get().n) this.ctx.throw(409, '系统已完成初始化');
+    const input = body(this.ctx);
+    const user = await this.service.auth.createUser({ username: input.username, displayName: input.displayName, password: input.password, roles: [ 'SYSTEM_ADMIN' ], scopes: [] }, 'system', { bootstrap: true });
+    const result = await this.service.auth.login(input.username, input.password, this.ctx.ip, this.ctx.get('user-agent'));
+    cookie(this.ctx, 'risk_session', result.token, { maxAge: 8 * 60 * 60 * 1000 });
+    cookie(this.ctx, 'risk_csrf', result.csrf, { httpOnly: false, maxAge: 8 * 60 * 60 * 1000 });
+    this.ctx.status = 201;
+    ok(this.ctx, { user, csrfToken: result.csrf, roles: this.service.auth.labels() });
+  }
+
+  async login() {
+    try {
+      const input = body(this.ctx);
+      const result = await this.service.auth.login(input.username, input.password, this.ctx.ip, this.ctx.get('user-agent'));
+      this.ctx.app.loginAttempts?.delete(this.ctx.ip || 'unknown');
+      const config = this.service.db.systemConfig();
+      cookie(this.ctx, 'risk_session', result.token, { maxAge: config.sessionAbsoluteHours * 60 * 60 * 1000 });
+      cookie(this.ctx, 'risk_csrf', result.csrf, { httpOnly: false, maxAge: config.sessionAbsoluteHours * 60 * 60 * 1000 });
+      ok(this.ctx, { user: result.user, csrfToken: result.csrf, roles: this.service.auth.labels() });
+    } catch (err) { this.ctx.status = err.status || 401; this.ctx.body = { ok: false, error: err.message, code: err.code }; }
+  }
+
+  async authMe() {
+    ok(this.ctx, { user: this.ctx.state.user, csrfToken: this.ctx.cookies.get('risk_csrf', { signed: false }) || '', roles: this.service.auth.labels(), scopes: this.service.auth.scopeLabels() });
+  }
+
+  async logout() {
+    this.service.auth.logout(this.ctx.state.principal);
+    cookie(this.ctx, 'risk_session', '', { maxAge: -1 });
+    cookie(this.ctx, 'risk_csrf', '', { httpOnly: false, maxAge: -1 });
+    ok(this.ctx, { loggedOut: true });
+  }
+
+  async changePassword() {
+    try {
+      const input = body(this.ctx);
+      await this.service.auth.changePassword(this.ctx.state.user.id, input.oldPassword, input.password);
+      cookie(this.ctx, 'risk_session', '', { maxAge: -1 });
+      cookie(this.ctx, 'risk_csrf', '', { httpOnly: false, maxAge: -1 });
+      ok(this.ctx, { changed: true, loginRequired: true });
+    } catch (err) { this.ctx.status = err.status || 400; this.ctx.body = { ok: false, error: err.message }; }
+  }
+
+  async users() { ok(this.ctx, { users: this.service.auth.listUsers(), roles: this.service.auth.labels(), scopes: this.service.auth.scopeLabels() }); }
+  async createUser() {
+    try { this.ctx.status = 201; ok(this.ctx, { user: await this.service.auth.createUser(body(this.ctx), this.ctx.state.user.id) }); }
+    catch (err) { this.ctx.status = err.status || 400; this.ctx.body = { ok: false, error: err.message }; }
+  }
+  async updateUser() {
+    try { ok(this.ctx, { user: this.service.auth.updateUser(this.ctx.params.id, body(this.ctx), this.ctx.state.user.id) }); }
+    catch (err) { this.ctx.status = err.status || 400; this.ctx.body = { ok: false, error: err.message }; }
+  }
+  async resetUserPassword() {
+    try { await this.service.auth.resetPassword(this.ctx.params.id, body(this.ctx).password, this.ctx.state.user.id); ok(this.ctx, { reset: true, mustChangePassword: true }); }
+    catch (err) { this.ctx.status = err.status || 400; this.ctx.body = { ok: false, error: err.message }; }
+  }
+
+  async systemConfig() {
+    if (this.ctx.method === 'GET') { ok(this.ctx, this.service.db.systemConfig()); return; }
+    try {
+      const input = body(this.ctx);
+      if (input.llmBaseUrl) {
+        const url = new URL(String(input.llmBaseUrl));
+        if (![ 'http:', 'https:' ].includes(url.protocol) || url.username || url.password || url.search || url.hash) this.ctx.throw(400, '模型服务地址仅支持 HTTP(S) 基地址');
+      }
+      const saved = this.service.db.saveSystemConfig(input, this.ctx.state.user.username);
+      this.service.auth.event('SYSTEM_CONFIG_UPDATED', this.ctx.state.user.id, null, { fields: Object.keys(input) }, this.ctx.ip);
+      ok(this.ctx, saved);
+    } catch (err) { if (err.status) throw err; this.ctx.throw(400, err.message); }
+  }
+
+  async authEvents() {
+    const items = this.service.db.db.prepare('SELECT event_id,actor_user_id,target_user_id,event_type,details_json,source_address,created_at FROM auth_events ORDER BY created_at DESC LIMIT 200').all().map(row => ({ ...row, details: json(row.details_json), actor: row.actor_user_id ? this.service.auth.getUser(row.actor_user_id)?.username || '已删除账号' : '系统' }));
+    ok(this.ctx, items);
   }
 
   async projects() { ok(this.ctx, this.service.db.listProjects()); }
@@ -150,7 +234,7 @@ class ApiController extends Controller {
   applyExtraction(projectId, evidenceId, extraction) {
     const db = this.service.db.db;
     const now = this.service.db.now();
-    const lowConfidence = .65;
+    const lowConfidence = this.service.db.systemConfig().lowConfidenceThreshold;
     const upsertNode = db.prepare(`INSERT INTO nodes (id,project_id,name,kind,layer,tenant,pool,value,importance,sensitivity,availability,impact,risk_source,risk_name,probability,description,meta_json)
       VALUES (@id,@project_id,@name,@kind,@layer,@tenant,@pool,@value,@importance,@sensitivity,@availability,@impact,@risk_source,@risk_name,@probability,@description,@meta_json)
       ON CONFLICT(id) DO NOTHING`);
@@ -199,7 +283,7 @@ class ApiController extends Controller {
     if (![ 'level', 'risk_value' ].includes(field)) this.ctx.throw(400, '不支持的复核字段');
     if (field === 'level' && ![ '很低', '低', '中', '高', '很高' ].includes(input.afterValue)) this.ctx.throw(400, '风险等级无效');
     if (field === 'risk_value' && (!Number.isFinite(Number(input.afterValue)) || Number(input.afterValue) < 0 || Number(input.afterValue) > 1)) this.ctx.throw(400, '风险值必须在 0 到 1 之间');
-    const review = { id: id('REV'), project_id: risk.project_id, risk_id: risk.id, field, before_value: String(input.beforeValue ?? ''), after_value: String(input.afterValue ?? ''), reason: input.reason || '人工复核修订', reviewer: input.reviewer || '复核人员', created_at: this.service.db.now() };
+    const review = { id: id('REV'), project_id: risk.project_id, risk_id: risk.id, field, before_value: String(input.beforeValue ?? ''), after_value: String(input.afterValue ?? ''), reason: input.reason || '人工复核修订', reviewer: this.ctx.state.user.displayName, created_at: this.service.db.now() };
     this.service.db.db.prepare('INSERT INTO reviews (id,project_id,risk_id,field,before_value,after_value,reason,reviewer,created_at) VALUES (@id,@project_id,@risk_id,@field,@before_value,@after_value,@reason,@reviewer,@created_at)').run(review);
     if (field === 'level') this.service.db.db.prepare('UPDATE risks SET level=? WHERE id=?').run(input.afterValue, risk.id);
     if (field === 'risk_value') {

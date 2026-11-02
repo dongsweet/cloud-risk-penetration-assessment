@@ -3,7 +3,7 @@ services:
     build: .
     restart: unless-stopped
     ports:
-      - "${HOST_PORT:-7001}:7001"
+      - "${HOST_PORT:-17003}:7001"
     env_file:
       - .env
     volumes:

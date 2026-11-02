@@ -4,11 +4,11 @@ const path = require('path');
 
 module.exports = appInfo => {
   const config = exports = {};
-  config.keys = 'cloud-risk-penetration-demo-change-me';
+  config.keys = process.env.APP_KEYS || 'local-development-only-change-this-to-a-random-32-character-key';
   config.logger = { level: 'INFO' };
   config.server = { port: Number(process.env.PORT || 7001), hostname: '0.0.0.0' };
   config.cluster = { listen: { port: Number(process.env.PORT || 7001), hostname: '0.0.0.0' } };
-  config.middleware = [ 'errorHandler' ];
+  config.middleware = [ 'errorHandler', 'authorize' ];
   config.static = { prefix: '/', dir: path.join(appInfo.baseDir, 'public'), gzip: true };
   config.multipart = {
     mode: 'file',

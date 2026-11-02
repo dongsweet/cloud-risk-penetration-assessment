@@ -8,7 +8,7 @@
     "dev": "egg-bin dev",
     "stop": "egg-scripts stop --title=cloud-risk-demo",
     "debug": "egg-scripts start --framework=./framework --workers=2 --inspect --title=cloud-risk-demo",
-    "lint": "node --check app/router.js && node --check app/service/risk.js && node --check app/controller/api.js",
+    "lint": "node --check app/router.js && node --check app/service/risk.js && node --check app/service/auth.js && node --check app/service/db.js && node --check app/service/llm.js && node --check app/middleware/authorize.js && node --check app/lib/access-control.js && node --check app/controller/api.js",
     "test": "node --test"
   },
   "dependencies": {
