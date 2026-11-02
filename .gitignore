@@ -5,3 +5,6 @@ demo/data/tmp/
 demo/uploads/*
 !demo/uploads/.gitkeep
 demo/logs/
+
+demo/data/*.db-shm
+demo/data/*.db-wal
