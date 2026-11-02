@@ -14,7 +14,7 @@ module.exports = appInfo => {
     mode: 'file',
     fileSize: '20mb',
     cleanSchedule: { cron: '0 0 * * * *' },
-    whitelist: [ '.txt', '.csv', '.json', '.md', '.docx', '.pdf' ],
+    whitelist: [ '.txt', '.csv', '.json', '.md', '.docx', '.pdf', '.xlsx' ],
     tmpdir: path.join(appInfo.baseDir, 'data', 'tmp')
   };
   config.security = { csrf: { enable: false } };

@@ -18,3 +18,8 @@ test('evidence validation rejects unsupported relation and invalid confidence', 
   assert.throws(() => normalize({ relations: [ { from: 'A', to: 'B', relation: '未知关系' } ] }), /关系/);
   assert.throws(() => normalize({ assets: [ { id: 'A', confidence: 2 } ] }), /置信度/);
 });
+
+test('Excel import helper is exposed without reading a workbook in unit tests', () => {
+  const evidence = require('../app/lib/evidence');
+  assert.equal(typeof evidence.importExcel, 'function');
+});

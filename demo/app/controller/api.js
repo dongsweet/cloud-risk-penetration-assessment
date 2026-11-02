@@ -6,6 +6,7 @@ const path = require('path');
 const crypto = require('crypto');
 const mammoth = require('mammoth');
 const PDFDocument = require('pdfkit');
+const ExcelJS = require('exceljs');
 const evidenceTools = require('../lib/evidence');
 const { cookie } = require('../middleware/authorize');
 
@@ -124,6 +125,28 @@ class ApiController extends Controller {
     ok(this.ctx, items);
   }
 
+  async graphTemplate() {
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = '云盾 RiskLab';
+    const addSheet = (name, columns) => {
+      const sheet = workbook.addWorksheet(name);
+      sheet.columns = columns.map(header => ({ header, key: header, width: Math.max(14, header.length * 2) }));
+      sheet.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } };
+      sheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: '2864E8' } };
+      sheet.views = [ { state: 'frozen', ySplit: 1 } ];
+      return sheet;
+    };
+    addSheet('资产节点', [ 'asset_id', 'asset_name', 'asset_type', 'layer', 'tenant', 'pool', 'value', 'importance', 'sensitivity', 'availability', 'impact', 'risk_name', 'probability', 'source', 'confidence', 'description' ]);
+    addSheet('关系边', [ 'edge_id', 'source_asset_id', 'target_asset_id', 'relation_type', 'active', 'source', 'confidence', 'valid_from', 'valid_to', 'C', 'N', 'P', 'R', 'E', 'B', 'I' ]);
+    addSheet('风险源', [ 'node_id', 'risk_name', 'probability', 'source', 'confidence' ]);
+    const note = workbook.addWorksheet('填写说明');
+    note.columns = [ { header: '说明', key: 'note', width: 100 } ];
+    [ '模板不含示例资产，请直接填写本次评估材料中的真实数据。', '资产 asset_type 可填 host/virtualization/vm/container/application/database/business/account/resource_pool/security_control/storage/network/other。', '资产 layer 只能填 platform、tenant 或 control；关系类型使用系统允许的中文枚举；active 可填 有效/失效 或 true/false。', '置信度和计算因子填写 0 到 1；导入前服务端会校验整本工作簿，错误行会整体拒绝，不会生成部分图谱。', '关系边引用的 source_asset_id 和 target_asset_id 必须存在于资产节点工作表或当前项目图谱中。' ].forEach(text => note.addRow([ text ]));
+    this.ctx.type = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+    this.ctx.set('Content-Disposition', 'attachment; filename="cloud-risk-graph-template.xlsx"');
+    this.ctx.body = await workbook.xlsx.writeBuffer();
+  }
+
   async projects() { ok(this.ctx, this.service.db.listProjects()); }
 
   async createProject() {
@@ -169,6 +192,24 @@ class ApiController extends Controller {
     const safeName = `${Date.now()}-${path.basename(file.filename).replace(/[^\w.\-\u4e00-\u9fa5]/g, '_')}`;
     const target = path.join(uploadDir, safeName);
     fs.copyFileSync(file.filepath, target);
+    const extension = path.extname(file.filename).slice(1).toLowerCase();
+    if (extension === 'xlsx') {
+      const evidence = { id: id('EV'), project_id: projectId, filename: file.filename, type: extension, content: '', status: 'pending', extraction_json: '{}', source: `Excel 图谱导入：${file.filename}`, confidence: 0, created_at: this.service.db.now() };
+      this.service.db.db.prepare('INSERT INTO evidence (id,project_id,filename,type,content,status,extraction_json,source,confidence,created_at) VALUES (@id,@project_id,@filename,@type,@content,@status,@extraction_json,@source,@confidence,@created_at)').run(evidence);
+      try {
+        const extraction = await evidenceTools.importExcel(target, `Excel 图谱导入：${file.filename}`);
+        this.applyExtraction(projectId, evidence.id, extraction);
+        this.service.db.db.prepare("UPDATE evidence SET status='extracted',extraction_json=?,confidence=?,error=NULL WHERE id=?").run(JSON.stringify(extraction), .9, evidence.id);
+        evidence.status = 'extracted'; evidence.extraction_json = JSON.stringify(extraction); evidence.confidence = .9;
+        this.service.db.audit(projectId, 'import_graph_excel', file.filename);
+        return ok(ctx, { ...evidence, extraction });
+      } catch (err) {
+        this.service.db.db.prepare("UPDATE evidence SET status='rejected',error=? WHERE id=?").run(err.message, evidence.id);
+        this.service.db.audit(projectId, 'import_graph_excel_failed', `${file.filename} / ${err.message}`);
+        this.ctx.status = 422;
+        return this.ctx.body = { ok: false, error: err.message, data: { status: 'pending', retryable: false } };
+      }
+    }
     let content = '';
     let readError = '';
     try { content = await this.readEvidence(target, file.filename); } catch (err) { readError = `文本提取失败：${err.message}`; }
@@ -238,8 +279,8 @@ class ApiController extends Controller {
     const upsertNode = db.prepare(`INSERT INTO nodes (id,project_id,name,kind,layer,tenant,pool,value,importance,sensitivity,availability,impact,risk_source,risk_name,probability,description,meta_json)
       VALUES (@id,@project_id,@name,@kind,@layer,@tenant,@pool,@value,@importance,@sensitivity,@availability,@impact,@risk_source,@risk_name,@probability,@description,@meta_json)
       ON CONFLICT(id) DO NOTHING`);
-    const insertEdge = db.prepare(`INSERT INTO edges (id,project_id,from_id,to_id,relation,active,source,confidence,factors_json)
-      VALUES (@id,@project_id,@from_id,@to_id,@relation,@active,@source,@confidence,@factors_json)
+    const insertEdge = db.prepare(`INSERT INTO edges (id,project_id,from_id,to_id,relation,active,source,confidence,factors_json,valid_from,valid_to)
+      VALUES (@id,@project_id,@from_id,@to_id,@relation,@active,@source,@confidence,@factors_json,@valid_from,@valid_to)
       ON CONFLICT(id) DO NOTHING`);
     const tx = db.transaction(() => {
       const extractedIds = new Set((extraction.assets || []).map(x => x.id));
@@ -260,7 +301,7 @@ class ApiController extends Controller {
         const current = db.prepare('SELECT * FROM edges WHERE id=? AND project_id=?').get(edgeId, projectId);
         if (current && !!current.active !== !!item.active) db.prepare('INSERT INTO followups (id,project_id,slot,title,question,status,created_at) VALUES (?,?,?,?,?,?,?)').run(id('FU'), projectId, `edge:${edgeId}:conflict`, '关系有效状态冲突待确认', `证据 ${evidenceId} 对关系 ${item.from} → ${item.to} 的有效状态与现有图谱不一致，请核实当前资源或权限状态。`, 'open', now);
         if (Number(item.confidence) < lowConfidence) db.prepare('INSERT INTO followups (id,project_id,slot,title,question,status,created_at) VALUES (?,?,?,?,?,?,?)').run(id('FU'), projectId, `edge:${edgeId}:confidence`, '低置信度关系待确认', `关系 ${item.from} → ${item.to} 的抽取置信度为 ${item.confidence}，请确认关系类型、方向和有效状态。`, 'open', now);
-        insertEdge.run({ id: edgeId, project_id: projectId, from_id: item.from, to_id: item.to, relation: item.relation, active: item.active && Number(item.confidence) >= lowConfidence ? 1 : 0, source: item.source || `证据 ${evidenceId}`, confidence: Number(item.confidence || .75), factors_json: JSON.stringify(item.factors || {}) });
+        insertEdge.run({ id: edgeId, project_id: projectId, from_id: item.from, to_id: item.to, relation: item.relation, active: item.active && Number(item.confidence) >= lowConfidence ? 1 : 0, source: item.source || `证据 ${evidenceId}`, confidence: Number(item.confidence || .75), factors_json: JSON.stringify(item.factors || {}), valid_from: item.valid_from || null, valid_to: item.valid_to || null });
       }
       for (const risk of extraction.risks || []) {
         const nodeId = risk.node_id || risk.asset_id || risk.assetId;

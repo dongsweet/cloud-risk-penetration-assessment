@@ -18,6 +18,7 @@
     "bootstrap-icons": "^1.13.1",
     "dotenv": "^16.4.7",
     "egg": "^4.2.0",
+    "exceljs": "^4.4.0",
     "egg-scripts": "^3.1.0",
     "@eggjs/multipart": "^5.1.0",
     "@eggjs/static": "^4.1.0",

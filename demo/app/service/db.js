@@ -84,7 +84,11 @@ class DbService extends Service {
     this.seedAccessControl();
     this.seedSystemConfig();
     const count = this._db.prepare('SELECT COUNT(*) AS n FROM projects').get().n;
-    if (!count) this.seed();
+    if (!count) {
+      if (process.env.SEED_DEMO_DATA === 'true') this.seed();
+      else this.seedEmpty();
+    }
+    if (process.env.SEED_DEMO_DATA !== 'true') this.removeSeedDemoData();
   }
 
   seedAccessControl() {
@@ -122,6 +126,32 @@ class DbService extends Service {
       insertFollowup.run({ id: 'FU-001', project_id: project.id, slot: 'edge:E08.source', title: '历史权限关系待确认', question: '历史配置显示 U01 可能直接访问 DB-A，但证据置信度较低且关系当前已失效。请确认该关系是否在当前权限状态下仍然有效，并提供最新审计记录。', status: 'open', created_at: now });
       insertTask.run({ id: 'TASK-001', project_id: project.id, risk_id: '', title: '升级 V1 虚拟化组件并复核租户隔离', owner: '云平台运维组', status: 'open', due_date: '2026-11-15', created_at: now });
       this._db.prepare('INSERT INTO audit_logs (project_id,action,detail,actor,created_at) VALUES (?,?,?,?,?)').run(project.id, 'seed', '初始化演示数据', 'system', now);
+    });
+    tx();
+  }
+
+  seedEmpty() {
+    const timestamp = this.now();
+    this._db.prepare('INSERT INTO projects (id,name,scope,status,created_at,updated_at) VALUES (?,?,?,?,?,?)').run('PRJ-DEMO-001', '跨层风险穿透评估项目', '待从 Excel 图谱或证据材料导入评估范围', 'draft', timestamp, timestamp);
+    this._db.prepare('INSERT INTO audit_logs (project_id,action,detail,actor,created_at) VALUES (?,?,?,?,?)').run('PRJ-DEMO-001', 'initialize_project', '创建空评估项目，等待导入资产图谱', 'system', timestamp);
+  }
+
+  removeSeedDemoData() {
+    const sampleNodes = this._db.prepare("SELECT id FROM nodes WHERE meta_json LIKE '%演示样例数据%' OR id IN ('H01','V1','VM-A1','DB-A','BIZ-A','U01','R01','SG01')").all().map(row => row.id);
+    const placeholders = sampleNodes.length ? sampleNodes.map(() => '?').join(',') : "''";
+    const tx = this._db.transaction(() => {
+      if (sampleNodes.length) {
+        this._db.prepare(`DELETE FROM edges WHERE from_id IN (${placeholders}) OR to_id IN (${placeholders})`).run(...sampleNodes, ...sampleNodes);
+        this._db.prepare(`DELETE FROM nodes WHERE id IN (${placeholders})`).run(...sampleNodes);
+      }
+      this._db.prepare("DELETE FROM risks WHERE project_id='PRJ-DEMO-001'").run();
+      this._db.prepare("DELETE FROM followups WHERE project_id='PRJ-DEMO-001' AND (slot LIKE 'edge:E08%' OR title LIKE '历史权限关系%')").run();
+      this._db.prepare("DELETE FROM remediation_tasks WHERE project_id='PRJ-DEMO-001' AND title LIKE '升级 V1%'").run();
+      this._db.prepare("DELETE FROM evidence WHERE project_id='PRJ-DEMO-001' AND (id IN ('EV-001','EV-002','EV-003') OR source LIKE '漏洞扫描平台 %' OR source LIKE '业务说明文档 %' OR source LIKE '权限审计平台 %')").run();
+      this._db.prepare("DELETE FROM followups WHERE project_id='PRJ-DEMO-001' AND id='FU-001'").run();
+      this._db.prepare("DELETE FROM remediation_tasks WHERE project_id='PRJ-DEMO-001' AND id='TASK-001'").run();
+      this._db.prepare("UPDATE projects SET name='跨层风险穿透评估项目',scope='待从 Excel 图谱或证据材料导入评估范围',status='draft',updated_at=? WHERE id='PRJ-DEMO-001'").run(this.now());
+      this._db.prepare('INSERT INTO audit_logs (project_id,action,detail,actor,created_at) VALUES (?,?,?,?,?)').run('PRJ-DEMO-001', 'remove_demo_seed', '已清理内置演示资产，等待导入真实评估材料', 'system', this.now());
     });
     tx();
   }
