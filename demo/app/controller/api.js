@@ -526,6 +526,10 @@ class ApiController extends Controller {
   }
 
   async llmReport() {
+    if (this.ctx.get('accept').includes('text/event-stream')) {
+      await this.streamLlmReport();
+      return;
+    }
     const projectId = this.ctx.params.projectId;
     const snapshot = this.reportSnapshot(projectId);
     try {
@@ -540,6 +544,45 @@ class ApiController extends Controller {
       this.service.db.audit(projectId, 'llm_report_failed', err.message, this.ctx.state.user?.username || 'system');
       this.ctx.status = 422;
       this.ctx.body = { ok: false, error: `评估报告生成失败：${err.message}`, data: { retryable: true } };
+    }
+  }
+
+  async streamLlmReport() {
+    const projectId = this.ctx.params.projectId;
+    const snapshot = this.reportSnapshot(projectId);
+    const res = this.ctx.res;
+    const newline = String.fromCharCode(10);
+    this.ctx.respond = false;
+    res.statusCode = 200;
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    const send = (name, data) => {
+      if (res.destroyed || res.writableEnded) return;
+      try { res.write('event: ' + name + newline + 'data: ' + JSON.stringify(data) + newline + newline); } catch (_) {}
+    };
+    if (res.flushHeaders) res.flushHeaders();
+    send('progress', { step: 0, total: 4, status: 'running', message: '已打开分步报告通道，准备执行 4 个模型步骤' });
+    const heartbeat = setInterval(() => {
+      if (!res.destroyed && !res.writableEnded) {
+        try { res.write('event: heartbeat' + newline + 'data: {}' + newline + newline); } catch (_) {}
+      }
+    }, 15000);
+    try {
+      const report = await this.service.llm.report(snapshot, progress => send('progress', progress));
+      const reportId = id('RPT');
+      const createdAt = this.service.db.now();
+      const actor = this.ctx.state.user?.username || 'system';
+      this.service.db.db.prepare('INSERT INTO llm_reports (id,project_id,model,report_json,status,error,created_at,created_by) VALUES (?,?,?,?,?,?,?,?)').run(reportId, projectId, report.model, JSON.stringify(report), 'generated', null, createdAt, actor);
+      this.service.db.audit(projectId, 'llm_report_generated', `${reportId} / ${report.model} / 分 4 步完成`, actor);
+      send('complete', { id: reportId, project_id: projectId, model: report.model, generatedAt: report.generatedAt, report });
+    } catch (err) {
+      this.service.db.audit(projectId, 'llm_report_failed', err.message, this.ctx.state.user?.username || 'system');
+      send('error', { message: `评估报告生成失败：${err.message}`, retryable: true });
+    } finally {
+      clearInterval(heartbeat);
+      if (!res.writableEnded) res.end();
     }
   }
 
