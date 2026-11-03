@@ -403,6 +403,9 @@ class ApiController extends Controller {
 
   applyExtraction(projectId, evidenceId, extraction) {
     const db = this.service.db.db;
+    const { evidenceLabel, formatEvidenceReferences } = require('../lib/evidence-reference');
+    const evidence = db.prepare('SELECT id,filename FROM evidence WHERE id=? AND project_id=?').get(evidenceId, projectId);
+    const evidenceName = evidenceLabel(evidenceId, evidence?.filename);
     const now = this.service.db.now();
     const lowConfidence = this.service.db.systemConfig().lowConfidenceThreshold;
     const upsertNode = db.prepare(`INSERT INTO nodes (id,project_id,name,kind,layer,tenant,pool,value,importance,sensitivity,availability,impact,risk_source,risk_name,probability,description,security_measures,meta_json)
@@ -428,18 +431,18 @@ class ApiController extends Controller {
         const valid = (v, fallback = 0) => { const n = Number(v ?? fallback); return Number.isFinite(n) && n >= 0 && n <= 1 ? n : fallback; };
         const current = db.prepare('SELECT * FROM nodes WHERE id=? AND project_id=?').get(item.id, projectId);
         const differs = current && ((item.name && current.name !== item.name) || (item.type && current.kind !== item.type) || (item.layer && current.layer !== item.layer) || [ 'value', 'importance', 'sensitivity', 'impact' ].some(k => item[k] !== undefined && Math.abs(Number(current[k] || 0) - Number(item[k])) > .01));
-        if (differs) db.prepare('INSERT INTO followups (id,project_id,slot,title,question,status,created_at) VALUES (?,?,?,?,?,?,?)').run(id('FU'), projectId, `asset:${item.id}:conflict`, '资产证据冲突待确认', `证据 ${evidenceId} 对资产 ${item.id} 的属性与当前图谱不一致，请确认采用值并补充依据。`, 'open', now);
+        if (differs) db.prepare('INSERT INTO followups (id,project_id,slot,title,question,status,created_at) VALUES (?,?,?,?,?,?,?)').run(id('FU'), projectId, `asset:${item.id}:conflict`, '资产证据冲突待确认', `材料 ${evidenceName} 对资产 ${item.id} 的属性与当前图谱不一致，请确认采用值并补充依据。`, 'open', now);
         const currentMeta = json(current?.meta_json || '{}');
         const securityMeasures = String(item.securityMeasures || item.security_measures || current?.security_measures || '').slice(0, 1000);
         upsertNode.run({ id: item.id, project_id: projectId, name: item.name || item.id, kind: item.type || 'other', layer: item.layer || 'tenant', tenant: item.tenant || '', pool: item.pool || '', value: valid(item.value), importance: valid(item.importance), sensitivity: valid(item.sensitivity), availability: valid(item.availability), impact: valid(item.impact), risk_source: 0, risk_name: '', probability: 0, description: item.description || current?.description || '', security_measures: securityMeasures, meta_json: JSON.stringify({ ...currentMeta, source: item.source, confidence: item.confidence, evidenceId, extractedAt: extraction.extractedAt || now, securityMeasures, reviewStatus: item.confidence < lowConfidence ? 'low_confidence_candidate' : 'candidate' }) });
-        if (Number(item.confidence) < lowConfidence) db.prepare('INSERT INTO followups (id,project_id,slot,title,question,status,created_at) VALUES (?,?,?,?,?,?,?)').run(id('FU'), projectId, `asset:${item.id}:confidence`, '低置信度资产待确认', `资产 ${item.id} 的抽取置信度为 ${item.confidence}，请确认资产标识、层级和属性。`, 'open', now);
+        if (Number(item.confidence) < lowConfidence) db.prepare('INSERT INTO followups (id,project_id,slot,title,question,status,created_at) VALUES (?,?,?,?,?,?,?)').run(id('FU'), projectId, `asset:${item.id}:confidence`, '低置信度资产待确认', `材料 ${evidenceName} 中资产 ${item.id} 的抽取置信度为 ${item.confidence}，请确认资产标识、层级和属性。`, 'open', now);
       }
       for (const item of extraction.relations || []) {
         const edgeId = item.id || `EDGE-${crypto.createHash('sha1').update(`${projectId}:${item.from}:${item.to}:${item.relation}`).digest('hex').slice(0, 12)}`;
         const current = db.prepare('SELECT * FROM edges WHERE id=? AND project_id=?').get(edgeId, projectId);
-        if (current && !!current.active !== !!item.active) db.prepare('INSERT INTO followups (id,project_id,slot,title,question,status,created_at) VALUES (?,?,?,?,?,?,?)').run(id('FU'), projectId, `edge:${edgeId}:conflict`, '关系有效状态冲突待确认', `证据 ${evidenceId} 对关系 ${item.from} → ${item.to} 的有效状态与现有图谱不一致，请核实当前资源或权限状态。`, 'open', now);
-        if (Number(item.confidence) < lowConfidence) db.prepare('INSERT INTO followups (id,project_id,slot,title,question,status,created_at) VALUES (?,?,?,?,?,?,?)').run(id('FU'), projectId, `edge:${edgeId}:confidence`, '低置信度关系待确认', `关系 ${item.from} → ${item.to} 的抽取置信度为 ${item.confidence}，请确认关系类型、方向和有效状态。`, 'open', now);
-        insertEdge.run({ id: edgeId, project_id: projectId, from_id: item.from, to_id: item.to, relation: item.relation, active: item.active && Number(item.confidence) >= lowConfidence ? 1 : 0, source: item.source || `证据 ${evidenceId}`, evidence_id: evidenceId, confidence: Number(item.confidence || .75), factors_json: JSON.stringify(item.factors || {}), valid_from: item.valid_from || null, valid_to: item.valid_to || null });
+        if (current && !!current.active !== !!item.active) db.prepare('INSERT INTO followups (id,project_id,slot,title,question,status,created_at) VALUES (?,?,?,?,?,?,?)').run(id('FU'), projectId, `edge:${edgeId}:conflict`, '关系有效状态冲突待确认', `材料 ${evidenceName} 对关系 ${item.from} → ${item.to} 的有效状态与现有图谱不一致，请核实当前资源或权限状态。`, 'open', now);
+        if (Number(item.confidence) < lowConfidence) db.prepare('INSERT INTO followups (id,project_id,slot,title,question,status,created_at) VALUES (?,?,?,?,?,?,?)').run(id('FU'), projectId, `edge:${edgeId}:confidence`, '低置信度关系待确认', `材料 ${evidenceName} 中关系 ${item.from} → ${item.to} 的抽取置信度为 ${item.confidence}，请确认关系类型、方向和有效状态。`, 'open', now);
+        insertEdge.run({ id: edgeId, project_id: projectId, from_id: item.from, to_id: item.to, relation: item.relation, active: item.active && Number(item.confidence) >= lowConfidence ? 1 : 0, source: item.source || `材料 ${evidenceName}`, evidence_id: evidenceId, confidence: Number(item.confidence || .75), factors_json: JSON.stringify(item.factors || {}), valid_from: item.valid_from || null, valid_to: item.valid_to || null });
       }
       for (const risk of extraction.risks || []) {
         const nodeId = risk.node_id || risk.asset_id || risk.assetId;
@@ -448,7 +451,7 @@ class ApiController extends Controller {
       for (let i = 0; i < (extraction.questions || []).length; i++) {
         const question = typeof extraction.questions[i] === 'string' ? extraction.questions[i] : extraction.questions[i].question;
         if (!question) continue;
-        db.prepare('INSERT INTO followups (id,project_id,slot,title,question,status,created_at) VALUES (?,?,?,?,?,?,?)').run(id('FU'), projectId, `evidence:${evidenceId}:question:${i + 1}`, '证据抽取待确认', question, 'open', now);
+        db.prepare('INSERT INTO followups (id,project_id,slot,title,question,status,created_at) VALUES (?,?,?,?,?,?,?)').run(id('FU'), projectId, `evidence:${evidenceId}:question:${i + 1}`, '证据抽取待确认', formatEvidenceReferences(question, evidence ? [ evidence ] : []), 'open', now);
       }
     });
     tx();

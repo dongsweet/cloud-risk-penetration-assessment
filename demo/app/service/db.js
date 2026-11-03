@@ -134,7 +134,16 @@ class DbService extends Service {
     if (!ids.size) return [];
     return this.db.prepare(`SELECT id,filename,type,status,source,confidence,created_at FROM evidence WHERE project_id=? AND id IN (${[ ...ids ].map(() => '?').join(',')})`).all(projectId, ...ids).map(e => ({ id: e.id, filename: e.filename, type: e.type, status: e.status, source: e.source, confidence: e.confidence, createdAt: e.created_at }));
   }
-  followups(projectId) { return this.db.prepare('SELECT * FROM followups WHERE project_id=? ORDER BY status DESC, created_at DESC').all(projectId); }
+  followups(projectId) {
+    const { formatEvidenceReferences } = require('../lib/evidence-reference');
+    const evidence = this.db.prepare('SELECT id,filename FROM evidence WHERE project_id=?').all(projectId);
+    return this.db.prepare('SELECT * FROM followups WHERE project_id=? ORDER BY status DESC, created_at DESC').all(projectId)
+      .map(item => ({
+        ...item,
+        question: formatEvidenceReferences(item.question, evidence),
+        answer: formatEvidenceReferences(item.answer, evidence)
+      }));
+  }
   reviews(projectId) { return this.db.prepare('SELECT * FROM reviews WHERE project_id=? ORDER BY created_at DESC').all(projectId); }
   audit(projectId, action, detail, actor = 'system') { const timestamp = this.now(); this.db.prepare('INSERT INTO audit_logs (project_id,action,detail,actor,created_at) VALUES (?,?,?,?,?)').run(projectId, action, detail, actor, timestamp); if (projectId) this.db.prepare('UPDATE projects SET updated_at=? WHERE id=?').run(timestamp, projectId); }
   systemConfig() {
