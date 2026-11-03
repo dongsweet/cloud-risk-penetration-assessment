@@ -32,6 +32,8 @@ module.exports = app => {
   router.post('/api/v1/projects', controller.api.createProject);
   router.get('/api/v1/projects/:id', controller.api.project);
   router.get('/api/v1/graph/:projectId', controller.api.graph);
+  router.patch('/api/v1/graph/:projectId/nodes/:nodeId', controller.api.updateNode);
+  router.patch('/api/v1/graph/:projectId/edges/:edgeId', controller.api.updateEdge);
   router.get('/api/v1/evidence/:projectId', controller.api.evidence);
   router.post('/api/v1/evidence/:projectId/upload', controller.api.uploadEvidence);
   router.post('/api/v1/evidence/:projectId/:evidenceId/extract', controller.api.extractEvidence);

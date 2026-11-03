@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { mergeConfig, evaluatePath, findPaths, level } = require('../app/lib/risk-engine');
+const { mergeConfig, evaluatePath, findPaths, analyzePaths, level } = require('../app/lib/risk-engine');
 
 test('risk level maps boundary values', () => {
   assert.equal(level(0.2), '很低');
@@ -48,4 +48,29 @@ test('path traversal ignores relationships outside their effective time range', 
   ];
   const edge = { from_id: 'S', to_id: 'T', active: true, valid_to: '2000-01-01T00:00:00.000Z', factors: { C: .5, N: .5, P: .5, R: .5, E: .5, B: .5, I: .2 } };
   assert.equal(findPaths(nodes, [ edge ], mergeConfig()).length, 0);
+});
+
+test('analysis reports blocked candidates while excluding them from scoring', () => {
+  const nodes = [
+    { id: 'S', layer: 'platform', risk_source: 1, probability: .4 },
+    { id: 'A', layer: 'platform' },
+    { id: 'T', layer: 'tenant', kind: 'business', value: .8, importance: .9, sensitivity: .8, impact: .7 }
+  ];
+  const factors = { C: .7, N: .7, P: .8, R: .5, E: .7, B: .8, I: .2 };
+  const result = analyzePaths(nodes, [
+    { id: 'E1', from_id: 'S', to_id: 'A', active: true, factors },
+    { id: 'E2', from_id: 'A', to_id: 'T', active: false, factors }
+  ], mergeConfig());
+  assert.equal(result.risks.length, 0);
+  assert.equal(result.blockedCount, 1);
+  assert.deepEqual(result.blockedEdges, [ 'E2' ]);
+});
+
+test('path result exposes penetration level and review rationale', () => {
+  const cfg = mergeConfig();
+  const result = evaluatePath({ id: 'S', layer: 'platform', risk_source: 1, probability: .5 }, { id: 'T', name: '核心库', layer: 'tenant', sensitivity: .9, importance: .9, value: .9, impact: .9 }, [ { id: 'S' }, { id: 'T' } ], [ { id: 'E', factors: { C: 1, N: 1, P: .8, R: .7, E: .8, B: 1, I: 0 } } ], cfg);
+  assert.ok(result.penetrationLevel);
+  assert.equal(result.reviewRequired, true);
+  assert.ok(result.recommendation);
+  assert.ok(result.priority <= 3);
 });

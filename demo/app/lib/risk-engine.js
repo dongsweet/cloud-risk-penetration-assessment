@@ -43,14 +43,43 @@ function evaluatePath(source, target, pathNodes, pathEdges, cfg) {
   const lossWeights = cfg.lossWeights;
   const loss = Math.min(1, lossWeights.Av * Number(target.value || 0) + lossWeights.K * Number(target.importance || 0) + lossWeights.D * Number(target.sensitivity || 0) + lossWeights.Ic * Number(target.impact ?? target.availability ?? 0));
   const riskValue = probability * loss;
-  return { source, target, pathNodes: pathNodes.map(n => n.id), pathEdges: pathEdges.map(e => e.id), factors, score, penetration, probability, loss, riskValue, level: level(riskValue, cfg.thresholds), valid: true };
+  const riskLevel = level(riskValue, cfg.thresholds);
+  const penetrationLevel = level(penetration, cfg.thresholds);
+  const nearThreshold = cfg.thresholds.some(t => Math.abs(riskValue - Number(t)) <= .05);
+  const reviewReasons = [];
+  if ([ '高', '很高' ].includes(riskLevel)) reviewReasons.push('风险等级较高');
+  if (Number(target.sensitivity || 0) >= .7) reviewReasons.push('目标资产包含敏感数据');
+  if (Number(target.importance || 0) >= .7) reviewReasons.push('目标业务重要性较高');
+  if (pathEdges.length >= 3) reviewReasons.push('存在多跳跨层路径');
+  if (nearThreshold) reviewReasons.push('风险值接近等级阈值');
+  const priority = riskLevel === '很高' ? 1 : riskLevel === '高' ? 2 : riskLevel === '中' ? 3 : riskLevel === '低' ? 4 : 5;
+  const recommendation = factors.P >= .7
+    ? '收敛权限范围，启用强认证与审批复核，并核验权限审计记录。'
+    : factors.N >= .7 || factors.E >= .7 || factors.I < .3
+      ? '复核网络可达性和隔离策略，收敛暴露面并验证隔离控制有效性。'
+      : factors.C >= .7 || factors.R >= .7
+        ? '核对承载与共享资源边界，落实资源池隔离和变更审批。'
+        : '补充证据并按优先级落实补丁、配置加固和恢复验证。';
+  return { source, target, pathNodes: pathNodes.map(n => n.id), pathEdges: pathEdges.map(e => e.id), factors, score, penetration, penetrationLevel, probability, loss, riskValue, level: riskLevel, priority, recommendation, reviewRequired: reviewReasons.length > 0, reviewReasons, nearThreshold, valid: true };
 }
 
-function findPaths(nodes, edges, cfg, maxDepth = 7) {
+function edgeIsEffective(edge, at = Date.now()) {
+  return !!edge.active && (!edge.valid_from || Date.parse(edge.valid_from) <= at) && (!edge.valid_to || Date.parse(edge.valid_to) >= at);
+}
+
+function analyzePaths(nodes, edges, cfg, maxDepth = 7) {
   const byId = new Map(nodes.map(n => [ n.id, n ]));
   const outgoing = new Map();
+  const allOutgoing = new Map();
   const at = Date.now();
-  for (const edge of edges.filter(e => e.active && (!e.valid_from || Date.parse(e.valid_from) <= at) && (!e.valid_to || Date.parse(e.valid_to) >= at))) {
+  const effective = [];
+  const blocked = [];
+  for (const edge of edges) {
+    if (!allOutgoing.has(edge.from_id)) allOutgoing.set(edge.from_id, []);
+    allOutgoing.get(edge.from_id).push(edge);
+    if (edgeIsEffective(edge, at)) effective.push(edge); else blocked.push(edge);
+  }
+  for (const edge of effective) {
     if (!outgoing.has(edge.from_id)) outgoing.set(edge.from_id, []);
     outgoing.get(edge.from_id).push(edge);
   }
@@ -67,7 +96,30 @@ function findPaths(nodes, edges, cfg, maxDepth = 7) {
     }
   };
   for (const source of nodes.filter(n => n.risk_source)) walk(source, source, [ source ], [], new Set([ source.id ]));
-  return results;
+  const blockedSignatures = new Set();
+  const blockedEdges = new Set();
+  const blockedWalk = (source, current, pathNodes, pathEdges, seen) => {
+    if (pathEdges.length && targets.has(current.id) && current.id !== source.id && pathEdges.some(e => !edgeIsEffective(e, at))) {
+      const signature = `${source.id}:${pathNodes.map(n => n.id).join('>')}`;
+      if (!blockedSignatures.has(signature)) {
+        blockedSignatures.add(signature);
+        pathEdges.filter(e => !edgeIsEffective(e, at)).forEach(e => blockedEdges.add(e.id));
+      }
+    }
+    if (pathEdges.length >= maxDepth) return;
+    for (const edge of allOutgoing.get(current.id) || []) {
+      if (seen.has(edge.to_id)) continue;
+      const next = byId.get(edge.to_id);
+      if (!next) continue;
+      blockedWalk(source, next, pathNodes.concat(next), pathEdges.concat(edge), new Set([ ...seen, next.id ]));
+    }
+  };
+  for (const source of nodes.filter(n => n.risk_source)) blockedWalk(source, source, [ source ], [], new Set([ source.id ]));
+  return { risks: results, blockedCount: blockedSignatures.size, blockedEdgeCount: blockedEdges.size, blockedEdges: [ ...blockedEdges ], effectiveEdgeCount: effective.length, invalidEdgeCount: blocked.length };
 }
 
-module.exports = { DEFAULTS, level, mergeConfig, evaluatePath, findPaths };
+function findPaths(nodes, edges, cfg, maxDepth = 7) {
+  return analyzePaths(nodes, edges, cfg, maxDepth).risks;
+}
+
+module.exports = { DEFAULTS, level, mergeConfig, evaluatePath, findPaths, analyzePaths, edgeIsEffective };

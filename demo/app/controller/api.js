@@ -43,6 +43,7 @@ class ApiController extends Controller {
       hasSecurityAdmin: empty.hasSecurityAdmin,
       llmConfigured: empty.llmConfigured,
       riskConfig: this.service.risk.getConfig(project.id),
+      riskSummary: project.risk_summary || {},
       modelName: empty.modelName
     });
   }
@@ -168,15 +169,55 @@ class ApiController extends Controller {
   async project() {
     const project = this.service.db.project(this.ctx.params.id);
     if (!project) this.ctx.throw(404, '评估项目不存在');
-    ok(this.ctx, { project, nodes: this.service.db.nodes(project.id), edges: this.service.db.edges(project.id), evidence: this.service.db.evidence(project.id), risks: this.service.db.risks(project.id), followups: this.service.db.followups(project.id), reviews: this.service.db.reviews(project.id) });
+    ok(this.ctx, { project, nodes: this.service.db.nodes(project.id), edges: this.service.db.edges(project.id), evidence: this.service.db.evidence(project.id), risks: this.service.db.risks(project.id), followups: this.service.db.followups(project.id), reviews: this.service.db.reviews(project.id), tasks: this.service.db.db.prepare('SELECT * FROM remediation_tasks WHERE project_id=? ORDER BY priority, due_date').all(project.id), audit: this.service.db.db.prepare('SELECT * FROM audit_logs WHERE project_id=? ORDER BY created_at DESC LIMIT 100').all(project.id) });
   }
 
   async graph() { ok(this.ctx, { nodes: this.service.db.nodes(this.ctx.params.projectId), edges: this.service.db.edges(this.ctx.params.projectId) }); }
+  async updateNode() {
+    const projectId = this.ctx.params.projectId;
+    const node = this.service.db.db.prepare('SELECT * FROM nodes WHERE id=? AND project_id=?').get(this.ctx.params.nodeId, projectId);
+    if (!node) this.ctx.throw(404, '资产节点不存在');
+    const input = body(this.ctx);
+    const allowed = [ 'name', 'kind', 'layer', 'tenant', 'pool', 'value', 'importance', 'sensitivity', 'availability', 'impact', 'securityMeasures', 'description' ];
+    const next = { ...node };
+    for (const field of allowed) {
+      if (input[field] === undefined) continue;
+      if ([ 'value', 'importance', 'sensitivity', 'availability', 'impact' ].includes(field)) { const n = Number(input[field]); if (!Number.isFinite(n) || n < 0 || n > 1) this.ctx.throw(400, `${field} 必须在 0 到 1 之间`); next[field] = n; }
+      else if (field === 'securityMeasures') next.security_measures = String(input[field]).slice(0, 1000);
+      else next[field] = String(input[field]).slice(0, 200);
+    }
+    const reason = String(input.reason || '人工复核修订资产属性').slice(0, 500);
+    const changes = {};
+    for (const field of allowed) { const before = field === 'securityMeasures' ? node.security_measures : node[field]; const after = field === 'securityMeasures' ? next.security_measures : next[field]; if (after !== undefined && String(before ?? '') !== String(after ?? '')) changes[field] = { before, after }; }
+    if (!Object.keys(changes).length) return ok(this.ctx, { node: this.service.db.nodes(projectId).find(n => n.id === node.id), changes: {} });
+    this.service.db.db.prepare('UPDATE nodes SET name=?,kind=?,layer=?,tenant=?,pool=?,value=?,importance=?,sensitivity=?,availability=?,impact=?,security_measures=?,description=? WHERE id=? AND project_id=?').run(next.name, next.kind, next.layer, next.tenant, next.pool, next.value, next.importance, next.sensitivity, next.availability, next.impact, next.security_measures || '', next.description || '', node.id, projectId);
+    for (const [ field, change ] of Object.entries(changes)) this.service.db.db.prepare('INSERT INTO reviews (id,project_id,risk_id,entity_type,entity_id,field,before_value,after_value,reason,reviewer,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)').run(id('REV'), projectId, null, 'node', node.id, field, String(change.before ?? ''), String(change.after ?? ''), reason, this.ctx.state.user.displayName, this.service.db.now());
+    this.service.db.audit(projectId, 'node_writeback', `${node.id} / ${Object.keys(changes).join(',')}`, this.ctx.state.user.username);
+    ok(this.ctx, { node: this.service.db.nodes(projectId).find(n => n.id === node.id), changes });
+  }
+  async updateEdge() {
+    const projectId = this.ctx.params.projectId;
+    const edge = this.service.db.db.prepare('SELECT * FROM edges WHERE id=? AND project_id=?').get(this.ctx.params.edgeId, projectId);
+    if (!edge) this.ctx.throw(404, '关系边不存在');
+    const input = body(this.ctx);
+    const nextActive = input.active === undefined ? !!edge.active : [ true, 1, '1', 'true', '有效', 'active' ].includes(input.active);
+    let factors = json(edge.factors_json || '{}');
+    if (input.factors !== undefined) { factors = {}; for (const key of [ 'C', 'N', 'P', 'R', 'E', 'B', 'I' ]) { const value = Number(input.factors[key] ?? factors[key] ?? .5); if (!Number.isFinite(value) || value < 0 || value > 1) this.ctx.throw(400, `关系因子 ${key} 必须在 0 到 1 之间`); factors[key] = value; } }
+    const reason = String(input.reason || '人工复核修订关系属性').slice(0, 500);
+    const changes = {};
+    if (nextActive !== !!edge.active) changes.active = { before: !!edge.active, after: nextActive };
+    if (JSON.stringify(factors) !== JSON.stringify(json(edge.factors_json || '{}'))) changes.factors = { before: json(edge.factors_json || '{}'), after: factors };
+    if (!Object.keys(changes).length) return ok(this.ctx, { edge: this.service.db.edges(projectId).find(e => e.id === edge.id), changes: {} });
+    this.service.db.db.prepare('UPDATE edges SET active=?,factors_json=? WHERE id=? AND project_id=?').run(nextActive ? 1 : 0, JSON.stringify(factors), edge.id, projectId);
+    for (const [ field, change ] of Object.entries(changes)) this.service.db.db.prepare('INSERT INTO reviews (id,project_id,risk_id,entity_type,entity_id,field,before_value,after_value,reason,reviewer,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)').run(id('REV'), projectId, null, 'edge', edge.id, field, JSON.stringify(change.before), JSON.stringify(change.after), reason, this.ctx.state.user.displayName, this.service.db.now());
+    this.service.db.audit(projectId, 'edge_writeback', `${edge.id} / ${Object.keys(changes).join(',')}`, this.ctx.state.user.username);
+    ok(this.ctx, { edge: this.service.db.edges(projectId).find(e => e.id === edge.id), changes });
+  }
   async evidence() { ok(this.ctx, this.service.db.evidence(this.ctx.params.projectId)); }
   async risks() { ok(this.ctx, this.service.db.risks(this.ctx.params.projectId)); }
   async reviews() { ok(this.ctx, this.service.db.reviews(this.ctx.params.projectId)); }
   async followups() { ok(this.ctx, this.service.db.followups(this.ctx.params.projectId)); }
-  async tasks() { ok(this.ctx, this.service.db.db.prepare('SELECT * FROM remediation_tasks WHERE project_id=? ORDER BY status, due_date').all(this.ctx.params.projectId)); }
+  async tasks() { ok(this.ctx, this.service.db.db.prepare('SELECT * FROM remediation_tasks WHERE project_id=? ORDER BY priority, status, due_date').all(this.ctx.params.projectId)); }
   async audit() { ok(this.ctx, this.service.db.db.prepare('SELECT * FROM audit_logs WHERE project_id=? ORDER BY created_at DESC LIMIT 100').all(this.ctx.params.projectId)); }
   async updateTask() {
     const task = this.service.db.db.prepare('SELECT * FROM remediation_tasks WHERE id=?').get(this.ctx.params.taskId);
@@ -286,17 +327,19 @@ class ApiController extends Controller {
     const db = this.service.db.db;
     const now = this.service.db.now();
     const lowConfidence = this.service.db.systemConfig().lowConfidenceThreshold;
-    const upsertNode = db.prepare(`INSERT INTO nodes (id,project_id,name,kind,layer,tenant,pool,value,importance,sensitivity,availability,impact,risk_source,risk_name,probability,description,meta_json)
-      VALUES (@id,@project_id,@name,@kind,@layer,@tenant,@pool,@value,@importance,@sensitivity,@availability,@impact,@risk_source,@risk_name,@probability,@description,@meta_json)
+    const upsertNode = db.prepare(`INSERT INTO nodes (id,project_id,name,kind,layer,tenant,pool,value,importance,sensitivity,availability,impact,risk_source,risk_name,probability,description,security_measures,meta_json)
+      VALUES (@id,@project_id,@name,@kind,@layer,@tenant,@pool,@value,@importance,@sensitivity,@availability,@impact,@risk_source,@risk_name,@probability,@description,@security_measures,@meta_json)
       ON CONFLICT(id) DO UPDATE SET
         value=CASE WHEN nodes.value=0 AND excluded.value>0 THEN excluded.value ELSE nodes.value END,
         importance=CASE WHEN nodes.importance=0 AND excluded.importance>0 THEN excluded.importance ELSE nodes.importance END,
         sensitivity=CASE WHEN nodes.sensitivity=0 AND excluded.sensitivity>0 THEN excluded.sensitivity ELSE nodes.sensitivity END,
         availability=CASE WHEN nodes.availability=0 AND excluded.availability>0 THEN excluded.availability ELSE nodes.availability END,
-        impact=CASE WHEN nodes.impact=0 AND excluded.impact>0 THEN excluded.impact ELSE nodes.impact END`);
-    const insertEdge = db.prepare(`INSERT INTO edges (id,project_id,from_id,to_id,relation,active,source,confidence,factors_json,valid_from,valid_to)
-      VALUES (@id,@project_id,@from_id,@to_id,@relation,@active,@source,@confidence,@factors_json,@valid_from,@valid_to)
-      ON CONFLICT(id) DO NOTHING`);
+        impact=CASE WHEN nodes.impact=0 AND excluded.impact>0 THEN excluded.impact ELSE nodes.impact END,
+        security_measures=CASE WHEN COALESCE(nodes.security_measures,'')='' AND excluded.security_measures<>'' THEN excluded.security_measures ELSE nodes.security_measures END,
+        meta_json=excluded.meta_json`);
+    const insertEdge = db.prepare(`INSERT INTO edges (id,project_id,from_id,to_id,relation,active,source,evidence_id,confidence,factors_json,valid_from,valid_to)
+      VALUES (@id,@project_id,@from_id,@to_id,@relation,@active,@source,@evidence_id,@confidence,@factors_json,@valid_from,@valid_to)
+      ON CONFLICT(id) DO UPDATE SET evidence_id=COALESCE(edges.evidence_id,excluded.evidence_id),source=CASE WHEN COALESCE(edges.source,'')='' THEN excluded.source ELSE edges.source END`);
     const tx = db.transaction(() => {
       const extractedIds = new Set((extraction.assets || []).map(x => x.id));
       for (const item of extraction.relations || []) {
@@ -308,7 +351,9 @@ class ApiController extends Controller {
         const current = db.prepare('SELECT * FROM nodes WHERE id=? AND project_id=?').get(item.id, projectId);
         const differs = current && ((item.name && current.name !== item.name) || (item.type && current.kind !== item.type) || (item.layer && current.layer !== item.layer) || [ 'value', 'importance', 'sensitivity', 'impact' ].some(k => item[k] !== undefined && Math.abs(Number(current[k] || 0) - Number(item[k])) > .01));
         if (differs) db.prepare('INSERT INTO followups (id,project_id,slot,title,question,status,created_at) VALUES (?,?,?,?,?,?,?)').run(id('FU'), projectId, `asset:${item.id}:conflict`, '资产证据冲突待确认', `证据 ${evidenceId} 对资产 ${item.id} 的属性与当前图谱不一致，请确认采用值并补充依据。`, 'open', now);
-        upsertNode.run({ id: item.id, project_id: projectId, name: item.name || item.id, kind: item.type || 'other', layer: item.layer || 'tenant', tenant: item.tenant || '', pool: item.pool || '', value: valid(item.value), importance: valid(item.importance), sensitivity: valid(item.sensitivity), availability: valid(item.availability), impact: valid(item.impact), risk_source: 0, risk_name: '', probability: 0, description: item.description || '', meta_json: JSON.stringify({ source: item.source, confidence: item.confidence, evidenceId, extractedAt: extraction.extractedAt || now, reviewStatus: item.confidence < lowConfidence ? 'low_confidence_candidate' : 'candidate' }) });
+        const currentMeta = json(current?.meta_json || '{}');
+        const securityMeasures = String(item.securityMeasures || item.security_measures || current?.security_measures || '').slice(0, 1000);
+        upsertNode.run({ id: item.id, project_id: projectId, name: item.name || item.id, kind: item.type || 'other', layer: item.layer || 'tenant', tenant: item.tenant || '', pool: item.pool || '', value: valid(item.value), importance: valid(item.importance), sensitivity: valid(item.sensitivity), availability: valid(item.availability), impact: valid(item.impact), risk_source: 0, risk_name: '', probability: 0, description: item.description || current?.description || '', security_measures: securityMeasures, meta_json: JSON.stringify({ ...currentMeta, source: item.source, confidence: item.confidence, evidenceId, extractedAt: extraction.extractedAt || now, securityMeasures, reviewStatus: item.confidence < lowConfidence ? 'low_confidence_candidate' : 'candidate' }) });
         if (Number(item.confidence) < lowConfidence) db.prepare('INSERT INTO followups (id,project_id,slot,title,question,status,created_at) VALUES (?,?,?,?,?,?,?)').run(id('FU'), projectId, `asset:${item.id}:confidence`, '低置信度资产待确认', `资产 ${item.id} 的抽取置信度为 ${item.confidence}，请确认资产标识、层级和属性。`, 'open', now);
       }
       for (const item of extraction.relations || []) {
@@ -316,7 +361,7 @@ class ApiController extends Controller {
         const current = db.prepare('SELECT * FROM edges WHERE id=? AND project_id=?').get(edgeId, projectId);
         if (current && !!current.active !== !!item.active) db.prepare('INSERT INTO followups (id,project_id,slot,title,question,status,created_at) VALUES (?,?,?,?,?,?,?)').run(id('FU'), projectId, `edge:${edgeId}:conflict`, '关系有效状态冲突待确认', `证据 ${evidenceId} 对关系 ${item.from} → ${item.to} 的有效状态与现有图谱不一致，请核实当前资源或权限状态。`, 'open', now);
         if (Number(item.confidence) < lowConfidence) db.prepare('INSERT INTO followups (id,project_id,slot,title,question,status,created_at) VALUES (?,?,?,?,?,?,?)').run(id('FU'), projectId, `edge:${edgeId}:confidence`, '低置信度关系待确认', `关系 ${item.from} → ${item.to} 的抽取置信度为 ${item.confidence}，请确认关系类型、方向和有效状态。`, 'open', now);
-        insertEdge.run({ id: edgeId, project_id: projectId, from_id: item.from, to_id: item.to, relation: item.relation, active: item.active && Number(item.confidence) >= lowConfidence ? 1 : 0, source: item.source || `证据 ${evidenceId}`, confidence: Number(item.confidence || .75), factors_json: JSON.stringify(item.factors || {}), valid_from: item.valid_from || null, valid_to: item.valid_to || null });
+        insertEdge.run({ id: edgeId, project_id: projectId, from_id: item.from, to_id: item.to, relation: item.relation, active: item.active && Number(item.confidence) >= lowConfidence ? 1 : 0, source: item.source || `证据 ${evidenceId}`, evidence_id: evidenceId, confidence: Number(item.confidence || .75), factors_json: JSON.stringify(item.factors || {}), valid_from: item.valid_from || null, valid_to: item.valid_to || null });
       }
       for (const risk of extraction.risks || []) {
         const nodeId = risk.node_id || risk.asset_id || risk.assetId;
@@ -392,13 +437,14 @@ class ApiController extends Controller {
     const projectId = this.ctx.params.projectId;
     const project = this.service.db.project(projectId);
     if (!project) this.ctx.throw(404, '评估项目不存在');
-    ok(this.ctx, { generatedAt: new Date().toISOString(), project, risks: this.service.db.risks(projectId), evidence: this.service.db.evidence(projectId), reviews: this.service.db.reviews(projectId), tasks: this.service.db.db.prepare('SELECT * FROM remediation_tasks WHERE project_id=?').all(projectId), formula: 'S=w1C+w2N+w3P+w4R+w5E+w6B-w7I; Tp=S+w7; Pt=min(1,Pp*(1+αTp)); Lt=λ1Av+λ2K+λ3D+λ4Ic; Rt=Pt*Lt' });
+    ok(this.ctx, { generatedAt: new Date().toISOString(), project, nodes: this.service.db.nodes(projectId), edges: this.service.db.edges(projectId), risks: this.service.db.risks(projectId), evidence: this.service.db.evidence(projectId), reviews: this.service.db.reviews(projectId), tasks: this.service.db.db.prepare('SELECT * FROM remediation_tasks WHERE project_id=? ORDER BY priority, due_date').all(projectId), audit: this.service.db.db.prepare('SELECT * FROM audit_logs WHERE project_id=? ORDER BY created_at DESC LIMIT 100').all(projectId), formula: 'S=w1C+w2N+w3P+w4R+w5E+w6B-w7I; Tp=S+w7; Pt=min(1,Pp*(1+αTp)); Lt=λ1Av+λ2K+λ3D+λ4Ic; Rt=Pt*Lt' });
   }
 
   async reportPdf() {
     const projectId = this.ctx.params.projectId;
     const project = this.service.db.project(projectId);
     if (!project) this.ctx.throw(404, '评估项目不存在');
+    const db = this.service.db.db;
     const risks = this.service.db.risks(projectId);
     const doc = new PDFDocument({ margin: 48, size: 'A4' });
     this.ctx.type = 'application/pdf';
@@ -411,11 +457,18 @@ class ApiController extends Controller {
     doc.fontSize(20).text('云计算跨层风险穿透评估报告', { align: 'center' }).moveDown();
     doc.fontSize(11).text(`项目：${project.name}`).text(`范围：${project.scope}`).text(`生成时间：${new Date().toLocaleString('zh-CN')}`).moveDown();
     doc.fontSize(14).text('评估结论').moveDown(.4);
+    const summary = project.risk_summary || {};
+    doc.fontSize(10).text(`有效路径：${summary.total || risks.length} 条；被阻断候选路径：${summary.blockedCount || 0} 条；失效/时效边：${summary.invalidEdgeCount || 0} 条`).moveDown(.4);
     if (!risks.length) doc.fontSize(11).text('尚未生成风险结果，请在系统中执行计算。');
     risks.forEach((r, i) => {
       doc.fontSize(12).text(`${i + 1}. ${r.level}风险｜${r.source_id} → ${r.target_id}`);
-      doc.fontSize(10).text(`路径：${r.path.nodes.join(' → ')}\n穿透评分：${r.penetration.toFixed(3)}｜租户风险值：${r.risk_value.toFixed(3)}\n依据：${r.reason}`).moveDown(.5);
+      const evidenceNames = (r.evidenceChain || []).map(e => e.filename).join('、') || '未关联证据';
+      doc.fontSize(10).text(`优先级：P${r.priority || 5}｜穿透等级：${r.penetration_level || '—'}｜路径：${r.path.nodes.join(' → ')}\n穿透评分：${Number(r.penetration || 0).toFixed(3)}｜租户风险值：${Number(r.risk_value || 0).toFixed(3)}\n复核命中：${(r.reviewReasons || []).join('；') || '无'}\n处置建议：${r.recommendation || '补充证据并人工确认'}\n证据链：${evidenceNames}\n依据：${r.reason}`).moveDown(.5);
     });
+    const tasks = db.prepare('SELECT * FROM remediation_tasks WHERE project_id=? ORDER BY priority,due_date').all(projectId);
+    if (tasks.length) { doc.fontSize(14).text('整改优先级').moveDown(.3); tasks.forEach((t, i) => doc.fontSize(10).text(`${i + 1}. P${t.priority || 3}｜${t.title}｜责任人：${t.owner || '未指定'}｜截止：${t.due_date || '未指定'}\n建议：${t.recommendation || '—'}`).moveDown(.3)); }
+    const reviews = this.service.db.reviews(projectId);
+    if (reviews.length) { doc.fontSize(14).text('人工复核记录').moveDown(.3); reviews.slice(0, 20).forEach(r => doc.fontSize(10).text(`${r.created_at}｜${r.reviewer}｜${r.entity_type || 'risk'} ${r.entity_id || r.risk_id || ''}｜${r.field}：${r.before_value} → ${r.after_value}｜${r.reason}`).moveDown(.2)); }
     doc.moveDown().fontSize(9).text('计算公式：S=w1C+w2N+w3P+w4R+w5E+w6B-w7I；Tp=S+w7；Pt=min(1,Pp×(1+αTp))；Lt=λ1Av+λ2K+λ3D+λ4Ic；Rt=Pt×Lt。');
     doc.end();
   }
