@@ -74,6 +74,11 @@ class DbService extends Service {
     ensureColumn('risks', 'business', "TEXT DEFAULT ''");
     ensureColumn('remediation_tasks', 'priority', 'INTEGER DEFAULT 3');
     ensureColumn('remediation_tasks', 'recommendation', "TEXT DEFAULT ''");
+    ensureColumn('remediation_tasks', 'completion_note', "TEXT DEFAULT ''");
+    ensureColumn('remediation_tasks', 'verification_note', "TEXT DEFAULT ''");
+    ensureColumn('remediation_tasks', 'evidence_reference', "TEXT DEFAULT ''");
+    ensureColumn('remediation_tasks', 'completed_by', "TEXT DEFAULT ''");
+    ensureColumn('remediation_tasks', 'completed_at', 'TEXT');
     ensureColumn('reviews', 'entity_type', "TEXT DEFAULT 'risk'");
     ensureColumn('reviews', 'entity_id', "TEXT DEFAULT ''");
     this.migrateProjectScopedGraphKeys();

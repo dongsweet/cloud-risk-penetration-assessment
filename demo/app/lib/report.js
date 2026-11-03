@@ -123,7 +123,12 @@ function buildReportInputs(snapshot) {
         due_date: item.due_date,
         priority: item.priority,
         status: item.status,
-        recommendation: item.recommendation
+        recommendation: item.recommendation,
+        completion_note: item.completion_note,
+        verification_note: item.verification_note,
+        evidence_reference: item.evidence_reference,
+        completed_by: item.completed_by,
+        completed_at: item.completed_at
       }))
     }
   };

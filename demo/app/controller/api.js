@@ -8,6 +8,7 @@ const mammoth = require('mammoth');
 const PDFDocument = require('pdfkit');
 const ExcelJS = require('exceljs');
 const evidenceTools = require('../lib/evidence');
+const { normalizeTaskCompletion } = require('../lib/task-completion');
 const { cookie } = require('../middleware/authorize');
 
 function id(prefix) { return `${prefix}-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`; }
@@ -224,8 +225,20 @@ class ApiController extends Controller {
     if (!task) this.ctx.throw(404, '整改任务不存在');
     const input = body(this.ctx);
     const status = [ 'open', 'in_progress', 'done', 'blocked' ].includes(input.status) ? input.status : task.status;
-    this.service.db.db.prepare('UPDATE remediation_tasks SET status=? WHERE id=?').run(status, task.id);
-    this.service.db.audit(task.project_id, 'task_status', `${task.id} / ${status}`);
+    let detail = `${task.id} / ${status}`;
+    if (status === 'done') {
+      let completion;
+      try { completion = normalizeTaskCompletion(input); }
+      catch (err) { this.ctx.throw(400, err.message); }
+      if (task.status === 'done') this.ctx.throw(409, '整改任务已经完成；如需重新处理，请先将任务状态调整为处理中');
+      const completedAt = this.service.db.now();
+      const completedBy = this.ctx.state.user?.displayName || this.ctx.state.user?.username || 'system';
+      this.service.db.db.prepare('UPDATE remediation_tasks SET status=?,completion_note=?,verification_note=?,evidence_reference=?,completed_by=?,completed_at=? WHERE id=?').run(status, completion.completionNote, completion.verificationNote, completion.evidenceReference, completedBy, completedAt, task.id);
+      detail += ` / 整改说明：${completion.completionNote} / 验证：${completion.verificationNote}${completion.evidenceReference ? ` / 佐证：${completion.evidenceReference}` : ''}`;
+    } else {
+      this.service.db.db.prepare('UPDATE remediation_tasks SET status=? WHERE id=?').run(status, task.id);
+    }
+    this.service.db.audit(task.project_id, 'task_status', detail, this.ctx.state.user?.username || 'system');
     ok(this.ctx, this.service.db.db.prepare('SELECT * FROM remediation_tasks WHERE id=?').get(task.id));
   }
 
@@ -521,7 +534,7 @@ class ApiController extends Controller {
       evidence: evidence.slice(0, 200).map(item => ({ filename: item.filename, type: item.type, status: item.status, source: item.source, confidence: item.confidence, error: item.error, extraction: item.extraction })),
       followups: followups.slice(0, 200).map(item => ({ title: item.title, question: item.question, status: item.status, answer: item.answer })),
       reviews: reviews.slice(0, 200),
-      tasks: tasks.slice(0, 200).map(item => ({ title: item.title, owner: item.owner, status: item.status, due_date: item.due_date, priority: item.priority, recommendation: item.recommendation }))
+      tasks: tasks.slice(0, 200).map(item => ({ title: item.title, owner: item.owner, status: item.status, due_date: item.due_date, priority: item.priority, recommendation: item.recommendation, completion_note: item.completion_note, verification_note: item.verification_note, evidence_reference: item.evidence_reference, completed_by: item.completed_by, completed_at: item.completed_at }))
     };
   }
 
@@ -619,7 +632,7 @@ class ApiController extends Controller {
       doc.fontSize(10).text(`优先级：P${r.priority || 5}｜穿透等级：${r.penetration_level || '—'}｜路径：${r.path.nodes.join(' → ')}\n穿透评分：${Number(r.penetration || 0).toFixed(3)}｜租户风险值：${Number(r.risk_value || 0).toFixed(3)}\n复核命中：${(r.reviewReasons || []).join('；') || '无'}\n处置建议：${r.recommendation || '补充证据并人工确认'}\n证据链：${evidenceNames}\n依据：${r.reason}`).moveDown(.5);
     });
     const tasks = db.prepare('SELECT * FROM remediation_tasks WHERE project_id=? ORDER BY priority,due_date').all(projectId);
-    if (tasks.length) { doc.fontSize(14).text('整改优先级').moveDown(.3); tasks.forEach((t, i) => doc.fontSize(10).text(`${i + 1}. P${t.priority || 3}｜${t.title}｜责任人：${t.owner || '未指定'}｜截止：${t.due_date || '未指定'}\n建议：${t.recommendation || '—'}`).moveDown(.3)); }
+    if (tasks.length) { doc.fontSize(14).text('整改优先级').moveDown(.3); tasks.forEach((t, i) => { const completion = t.status === 'done' ? `\n完成说明：${t.completion_note || '—'}\n验证结果：${t.verification_note || '—'}\n佐证：${t.evidence_reference || '未提供'}｜完成人：${t.completed_by || '—'}｜完成时间：${t.completed_at || '—'}` : `\n状态：${t.status || '待处理'}`; doc.fontSize(10).text(`${i + 1}. P${t.priority || 3}｜${t.title}｜责任人：${t.owner || '未指定'}｜截止：${t.due_date || '未指定'}\n建议：${t.recommendation || '—'}${completion}`).moveDown(.3); }); }
     const reviews = this.service.db.reviews(projectId);
     if (reviews.length) { doc.fontSize(14).text('人工复核记录').moveDown(.3); reviews.slice(0, 20).forEach(r => doc.fontSize(10).text(`${r.created_at}｜${r.reviewer}｜${r.entity_type || 'risk'} ${r.entity_id || r.risk_id || ''}｜${r.field}：${r.before_value} → ${r.after_value}｜${r.reason}`).moveDown(.2)); }
     doc.moveDown().fontSize(9).text('计算公式：S=w1C+w2N+w3P+w4R+w5E+w6B-w7I；Tp=S+w7；Pt=min(1,Pp×(1+αTp))；Lt=λ1Av+λ2K+λ3D+λ4Ic；Rt=Pt×Lt。');
