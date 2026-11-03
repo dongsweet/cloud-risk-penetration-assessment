@@ -34,13 +34,14 @@ class DbService extends Service {
   _init() {
     this._db.exec(`
       CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, name TEXT NOT NULL, scope TEXT, status TEXT DEFAULT 'draft', risk_config_json TEXT DEFAULT '{}', risk_summary_json TEXT DEFAULT '{}', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS nodes (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, name TEXT NOT NULL, kind TEXT, layer TEXT, tenant TEXT, pool TEXT, value REAL DEFAULT 0, importance REAL DEFAULT 0, sensitivity REAL DEFAULT 0, availability REAL DEFAULT 0, impact REAL DEFAULT 0, risk_source INTEGER DEFAULT 0, risk_name TEXT, probability REAL DEFAULT 0, description TEXT, security_measures TEXT DEFAULT '', meta_json TEXT DEFAULT '{}');
-      CREATE TABLE IF NOT EXISTS edges (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, from_id TEXT NOT NULL, to_id TEXT NOT NULL, relation TEXT NOT NULL, active INTEGER DEFAULT 1, source TEXT, evidence_id TEXT, confidence REAL DEFAULT 0, factors_json TEXT DEFAULT '{}', valid_from TEXT, valid_to TEXT);
+      CREATE TABLE IF NOT EXISTS nodes (id TEXT NOT NULL, project_id TEXT NOT NULL, name TEXT NOT NULL, kind TEXT, layer TEXT, tenant TEXT, pool TEXT, value REAL DEFAULT 0, importance REAL DEFAULT 0, sensitivity REAL DEFAULT 0, availability REAL DEFAULT 0, impact REAL DEFAULT 0, risk_source INTEGER DEFAULT 0, risk_name TEXT, probability REAL DEFAULT 0, description TEXT, security_measures TEXT DEFAULT '', meta_json TEXT DEFAULT '{}', PRIMARY KEY(project_id, id));
+      CREATE TABLE IF NOT EXISTS edges (id TEXT NOT NULL, project_id TEXT NOT NULL, from_id TEXT NOT NULL, to_id TEXT NOT NULL, relation TEXT NOT NULL, active INTEGER DEFAULT 1, source TEXT, evidence_id TEXT, confidence REAL DEFAULT 0, factors_json TEXT DEFAULT '{}', valid_from TEXT, valid_to TEXT, PRIMARY KEY(project_id, id));
       CREATE TABLE IF NOT EXISTS evidence (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, filename TEXT, type TEXT, content TEXT, status TEXT DEFAULT 'pending', extraction_json TEXT DEFAULT '{}', source TEXT, confidence REAL DEFAULT 0, error TEXT, created_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS risks (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, source_id TEXT, target_id TEXT, path_json TEXT, valid INTEGER, score REAL, penetration REAL, penetration_level TEXT, probability REAL, loss REAL, risk_value REAL, level TEXT, priority INTEGER DEFAULT 5, recommendation TEXT DEFAULT '', review_required INTEGER DEFAULT 0, review_reasons_json TEXT DEFAULT '[]', evidence_chain_json TEXT DEFAULT '[]', source_layer TEXT, target_layer TEXT, tenant TEXT, business TEXT, factors_json TEXT, config_json TEXT DEFAULT '{}', reason TEXT, created_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS reviews (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, risk_id TEXT, field TEXT, before_value TEXT, after_value TEXT, reason TEXT, reviewer TEXT, created_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS followups (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, slot TEXT, title TEXT, question TEXT, status TEXT DEFAULT 'open', answer TEXT, created_at TEXT NOT NULL, answered_at TEXT);
       CREATE TABLE IF NOT EXISTS remediation_tasks (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, risk_id TEXT, title TEXT, owner TEXT, status TEXT DEFAULT 'open', due_date TEXT, priority INTEGER DEFAULT 3, recommendation TEXT DEFAULT '', created_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS llm_reports (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, model TEXT, report_json TEXT NOT NULL, status TEXT DEFAULT 'generated', error TEXT, created_at TEXT NOT NULL, created_by TEXT);
       CREATE TABLE IF NOT EXISTS audit_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, project_id TEXT, action TEXT, detail TEXT, actor TEXT, created_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS app_users (id TEXT PRIMARY KEY, username TEXT NOT NULL COLLATE NOCASE UNIQUE, display_name TEXT NOT NULL, password_hash TEXT NOT NULL, password_salt TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'ACTIVE', must_change_password INTEGER NOT NULL DEFAULT 1, failed_attempts INTEGER NOT NULL DEFAULT 0, locked_until INTEGER, last_login_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS app_user_roles (user_id TEXT NOT NULL REFERENCES app_users(id) ON DELETE CASCADE, role_code TEXT NOT NULL, PRIMARY KEY(user_id, role_code));
@@ -75,8 +76,24 @@ class DbService extends Service {
     ensureColumn('remediation_tasks', 'recommendation', "TEXT DEFAULT ''");
     ensureColumn('reviews', 'entity_type', "TEXT DEFAULT 'risk'");
     ensureColumn('reviews', 'entity_id', "TEXT DEFAULT ''");
+    this.migrateProjectScopedGraphKeys();
     this.seedAccessControl();
     this.seedSystemConfig();
+  }
+
+  migrateProjectScopedGraphKeys() {
+    const migrate = (table, columns, createSql) => {
+      const info = this._db.prepare(`PRAGMA table_info(${table})`).all();
+      const idColumn = info.find(column => column.name === 'id');
+      const projectColumn = info.find(column => column.name === 'project_id');
+      if (!idColumn || !projectColumn || idColumn.pk !== 1 || projectColumn.pk === 1) return;
+      const migrated = `${table}_project_scoped`;
+      this._db.transaction(() => {
+        this._db.exec(`DROP TABLE IF EXISTS ${migrated}; ${createSql.replaceAll('__TABLE__', migrated)}; INSERT INTO ${migrated} (${columns.join(',')}) SELECT ${columns.join(',')} FROM ${table}; DROP TABLE ${table}; ALTER TABLE ${migrated} RENAME TO ${table};`);
+      })();
+    };
+    migrate('nodes', [ 'id', 'project_id', 'name', 'kind', 'layer', 'tenant', 'pool', 'value', 'importance', 'sensitivity', 'availability', 'impact', 'risk_source', 'risk_name', 'probability', 'description', 'security_measures', 'meta_json' ], `CREATE TABLE __TABLE__ (id TEXT NOT NULL, project_id TEXT NOT NULL, name TEXT NOT NULL, kind TEXT, layer TEXT, tenant TEXT, pool TEXT, value REAL DEFAULT 0, importance REAL DEFAULT 0, sensitivity REAL DEFAULT 0, availability REAL DEFAULT 0, impact REAL DEFAULT 0, risk_source INTEGER DEFAULT 0, risk_name TEXT, probability REAL DEFAULT 0, description TEXT, security_measures TEXT DEFAULT '', meta_json TEXT DEFAULT '{}', PRIMARY KEY(project_id, id))`);
+    migrate('edges', [ 'id', 'project_id', 'from_id', 'to_id', 'relation', 'active', 'source', 'evidence_id', 'confidence', 'factors_json', 'valid_from', 'valid_to' ], `CREATE TABLE __TABLE__ (id TEXT NOT NULL, project_id TEXT NOT NULL, from_id TEXT NOT NULL, to_id TEXT NOT NULL, relation TEXT NOT NULL, active INTEGER DEFAULT 1, source TEXT, evidence_id TEXT, confidence REAL DEFAULT 0, factors_json TEXT DEFAULT '{}', valid_from TEXT, valid_to TEXT, PRIMARY KEY(project_id, id))`);
   }
 
   seedAccessControl() {
@@ -102,6 +119,7 @@ class DbService extends Service {
   edges(projectId) { return this.db.prepare('SELECT * FROM edges WHERE project_id=? ORDER BY id').all(projectId).map(e => ({ ...e, factors: JSON.parse(e.factors_json || '{}'), active: !!e.active })); }
   evidence(projectId) { return this.db.prepare('SELECT id,project_id,filename,type,status,extraction_json,source,confidence,error,created_at,CASE WHEN LENGTH(TRIM(content))>0 THEN 1 ELSE 0 END AS has_content FROM evidence WHERE project_id=? ORDER BY created_at DESC').all(projectId).map(e => ({ ...e, extraction: JSON.parse(e.extraction_json || '{}') })); }
   risks(projectId) { return this.db.prepare('SELECT * FROM risks WHERE project_id=? ORDER BY priority ASC, risk_value DESC, created_at DESC').all(projectId).map(r => ({ ...r, path: JSON.parse(r.path_json || '[]'), factors: JSON.parse(r.factors_json || '{}'), config: JSON.parse(r.config_json || '{}'), reviewReasons: JSON.parse(r.review_reasons_json || '[]'), evidenceChain: JSON.parse(r.evidence_chain_json || '[]'), valid: !!r.valid, reviewRequired: !!r.review_required })); }
+  llmReport(projectId) { const row = this.db.prepare('SELECT * FROM llm_reports WHERE project_id=? ORDER BY created_at DESC LIMIT 1').get(projectId); return row ? { id: row.id, project_id: row.project_id, model: row.model, status: row.status, report: JSON.parse(row.report_json || '{}'), error: row.error, created_at: row.created_at, created_by: row.created_by } : null; }
   riskEvidenceChain(projectId, path) {
     const ids = new Set();
     const nodeIds = path.nodes || [];

@@ -169,7 +169,7 @@ class ApiController extends Controller {
   async project() {
     const project = this.service.db.project(this.ctx.params.id);
     if (!project) this.ctx.throw(404, '评估项目不存在');
-    ok(this.ctx, { project, nodes: this.service.db.nodes(project.id), edges: this.service.db.edges(project.id), evidence: this.service.db.evidence(project.id), risks: this.service.db.risks(project.id), followups: this.service.db.followups(project.id), reviews: this.service.db.reviews(project.id), tasks: this.service.db.db.prepare('SELECT * FROM remediation_tasks WHERE project_id=? ORDER BY priority, due_date').all(project.id), audit: this.service.db.db.prepare('SELECT * FROM audit_logs WHERE project_id=? ORDER BY created_at DESC LIMIT 100').all(project.id) });
+    ok(this.ctx, { project, nodes: this.service.db.nodes(project.id), edges: this.service.db.edges(project.id), evidence: this.service.db.evidence(project.id), risks: this.service.db.risks(project.id), followups: this.service.db.followups(project.id), reviews: this.service.db.reviews(project.id), tasks: this.service.db.db.prepare('SELECT * FROM remediation_tasks WHERE project_id=? ORDER BY priority, due_date').all(project.id), audit: this.service.db.db.prepare('SELECT * FROM audit_logs WHERE project_id=? ORDER BY created_at DESC LIMIT 100').all(project.id), llmReport: this.service.db.llmReport(project.id) });
   }
 
   async graph() { ok(this.ctx, { nodes: this.service.db.nodes(this.ctx.params.projectId), edges: this.service.db.edges(this.ctx.params.projectId) }); }
@@ -240,7 +240,17 @@ class ApiController extends Controller {
     const target = path.join(uploadDir, safeName);
     fs.copyFileSync(file.filepath, target);
     const extension = path.extname(file.filename).slice(1).toLowerCase();
-    if (extension === 'xlsx' && await evidenceTools.isGraphTemplate(target)) {
+    const graphOnly = String(ctx.query.mode || '') === 'graph';
+    if (graphOnly && extension !== 'xlsx') {
+      fs.rmSync(target, { force: true });
+      ctx.throw(400, '跨层资产图谱补充仅支持填写完成的 Excel 图谱模板');
+    }
+    const isGraphTemplate = extension === 'xlsx' && await evidenceTools.isGraphTemplate(target);
+    if (graphOnly && !isGraphTemplate) {
+      fs.rmSync(target, { force: true });
+      ctx.throw(400, 'Excel 不是系统图谱模板，请先下载空白 Excel 图谱模板填写后再上传');
+    }
+    if (isGraphTemplate) {
       const evidence = { id: id('EV'), project_id: projectId, filename: file.filename, type: extension, content: '', status: 'pending', extraction_json: '{}', source: `Excel 图谱模板导入：${file.filename}`, confidence: 0, created_at: this.service.db.now() };
       this.service.db.db.prepare('INSERT INTO evidence (id,project_id,filename,type,content,status,extraction_json,source,confidence,created_at) VALUES (@id,@project_id,@filename,@type,@content,@status,@extraction_json,@source,@confidence,@created_at)').run(evidence);
       try {
@@ -287,6 +297,10 @@ class ApiController extends Controller {
   }
 
   async extractEvidence() {
+    if (this.ctx.get('accept').includes('text/event-stream')) {
+      await this.streamExtractEvidence();
+      return;
+    }
     const { projectId, evidenceId } = this.ctx.params;
     const row = this.service.db.db.prepare('SELECT * FROM evidence WHERE id=? AND project_id=?').get(evidenceId, projectId);
     if (!row) this.ctx.throw(404, '证据不存在');
@@ -304,6 +318,57 @@ class ApiController extends Controller {
       this.service.db.audit(projectId, 'extract_evidence_failed', `${row.filename} / ${err.message}`);
       this.ctx.status = 422;
       this.ctx.body = { ok: false, error: err.message, data: { status: 'pending', retryable: true } };
+    }
+  }
+
+  async streamExtractEvidence() {
+    const ctx = this.ctx;
+    const { projectId, evidenceId } = ctx.params;
+    const row = this.service.db.db.prepare('SELECT * FROM evidence WHERE id=? AND project_id=?').get(evidenceId, projectId);
+    if (!row) ctx.throw(404, '证据不存在');
+    if (!String(row.content || '').trim()) ctx.throw(422, row.error || '文件中没有可供模型分析的文本');
+    const res = ctx.res;
+    const newline = String.fromCharCode(10);
+    ctx.respond = false;
+    res.statusCode = 200;
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    const send = (name, data) => {
+      if (res.destroyed || res.writableEnded) return;
+      try { res.write('event: ' + name + newline + 'data: ' + JSON.stringify(data) + newline + newline); } catch (_) {}
+    };
+    if (res.flushHeaders) res.flushHeaders();
+    send('progress', { message: '材料已读取，正在提交分析请求', progress: 20 });
+    const heartbeat = setInterval(() => {
+      if (!res.destroyed && !res.writableEnded) {
+        try { res.write('event: heartbeat' + newline + 'data: {}' + newline + newline); } catch (_) {}
+      }
+    }, 15000);
+    try {
+      send('progress', { message: '正在等待模型返回结构化结果', progress: 35 });
+      const extraction = await this.service.llm.extract(row.content, row.filename, progress => {
+        if (progress.fallback) send('progress', progress);
+        else if (Number.isFinite(progress.responseChars)) send('progress', progress);
+      });
+      send('progress', { message: '收到完整响应，正在校验字段与置信度', progress: 82 });
+      this.applyExtraction(projectId, evidenceId, extraction);
+      const candidates = [ ...(extraction.assets || []), ...(extraction.relations || []), ...(extraction.risks || []) ];
+      const confidence = candidates.length ? Math.min(...candidates.map(x => Number(x.confidence ?? .8))) : .8;
+      this.service.db.db.prepare("UPDATE evidence SET status='extracted',extraction_json=?,confidence=?,error=NULL WHERE id=?").run(JSON.stringify(extraction), confidence, evidenceId);
+      this.service.db.audit(projectId, 'extract_evidence', row.filename + ' / ' + (extraction.model || process.env.LLM_MODEL || 'model'));
+      send('progress', { message: '结构化校验通过，抽取结果已保存', progress: 96 });
+      send('complete', { status: 'extracted', counts: { assets: (extraction.assets || []).length, relations: (extraction.relations || []).length, risks: (extraction.risks || []).length, questions: (extraction.questions || []).length } });
+    } catch (err) {
+      try {
+        this.service.db.db.prepare("UPDATE evidence SET status='pending',error=? WHERE id=?").run(err.message, evidenceId);
+        this.service.db.audit(projectId, 'extract_evidence_failed', row.filename + ' / ' + err.message);
+      } catch (saveError) { this.app.logger.error(saveError); }
+      send('error', { message: err.message || '材料解析失败', retryable: true });
+    } finally {
+      clearInterval(heartbeat);
+      if (!res.writableEnded) res.end();
     }
   }
 
@@ -329,7 +394,7 @@ class ApiController extends Controller {
     const lowConfidence = this.service.db.systemConfig().lowConfidenceThreshold;
     const upsertNode = db.prepare(`INSERT INTO nodes (id,project_id,name,kind,layer,tenant,pool,value,importance,sensitivity,availability,impact,risk_source,risk_name,probability,description,security_measures,meta_json)
       VALUES (@id,@project_id,@name,@kind,@layer,@tenant,@pool,@value,@importance,@sensitivity,@availability,@impact,@risk_source,@risk_name,@probability,@description,@security_measures,@meta_json)
-      ON CONFLICT(id) DO UPDATE SET
+      ON CONFLICT(project_id,id) DO UPDATE SET
         value=CASE WHEN nodes.value=0 AND excluded.value>0 THEN excluded.value ELSE nodes.value END,
         importance=CASE WHEN nodes.importance=0 AND excluded.importance>0 THEN excluded.importance ELSE nodes.importance END,
         sensitivity=CASE WHEN nodes.sensitivity=0 AND excluded.sensitivity>0 THEN excluded.sensitivity ELSE nodes.sensitivity END,
@@ -339,7 +404,7 @@ class ApiController extends Controller {
         meta_json=excluded.meta_json`);
     const insertEdge = db.prepare(`INSERT INTO edges (id,project_id,from_id,to_id,relation,active,source,evidence_id,confidence,factors_json,valid_from,valid_to)
       VALUES (@id,@project_id,@from_id,@to_id,@relation,@active,@source,@evidence_id,@confidence,@factors_json,@valid_from,@valid_to)
-      ON CONFLICT(id) DO UPDATE SET evidence_id=COALESCE(edges.evidence_id,excluded.evidence_id),source=CASE WHEN COALESCE(edges.source,'')='' THEN excluded.source ELSE edges.source END`);
+      ON CONFLICT(project_id,id) DO UPDATE SET evidence_id=COALESCE(edges.evidence_id,excluded.evidence_id),source=CASE WHEN COALESCE(edges.source,'')='' THEN excluded.source ELSE edges.source END`);
     const tx = db.transaction(() => {
       const extractedIds = new Set((extraction.assets || []).map(x => x.id));
       for (const item of extraction.relations || []) {
@@ -433,11 +498,56 @@ class ApiController extends Controller {
     }
   }
 
-  async report() {
-    const projectId = this.ctx.params.projectId;
+  reportSnapshot(projectId) {
     const project = this.service.db.project(projectId);
     if (!project) this.ctx.throw(404, '评估项目不存在');
-    ok(this.ctx, { generatedAt: new Date().toISOString(), project, nodes: this.service.db.nodes(projectId), edges: this.service.db.edges(projectId), risks: this.service.db.risks(projectId), evidence: this.service.db.evidence(projectId), reviews: this.service.db.reviews(projectId), tasks: this.service.db.db.prepare('SELECT * FROM remediation_tasks WHERE project_id=? ORDER BY priority, due_date').all(projectId), audit: this.service.db.db.prepare('SELECT * FROM audit_logs WHERE project_id=? ORDER BY created_at DESC LIMIT 100').all(projectId), formula: 'S=w1C+w2N+w3P+w4R+w5E+w6B-w7I; Tp=S+w7; Pt=min(1,Pp*(1+αTp)); Lt=λ1Av+λ2K+λ3D+λ4Ic; Rt=Pt*Lt' });
+    const nodes = this.service.db.nodes(projectId);
+    const edges = this.service.db.edges(projectId);
+    const evidence = this.service.db.evidence(projectId);
+    const risks = this.service.db.risks(projectId);
+    const tasks = this.service.db.db.prepare('SELECT * FROM remediation_tasks WHERE project_id=? ORDER BY priority, due_date').all(projectId);
+    const followups = this.service.db.followups(projectId);
+    const reviews = this.service.db.reviews(projectId);
+    return {
+      generatedAt: new Date().toISOString(),
+      project: { id: project.id, name: project.name, scope: project.scope, status: project.status },
+      summary: project.risk_summary || {},
+      riskConfig: project.risk_config || {},
+      formula: 'S=w1C+w2N+w3P+w4R+w5E+w6B-w7I; Tp=S+w7; Pt=min(1,Pp*(1+αTp)); Lt=λ1Av+λ2K+λ3D+λ4Ic; Rt=Pt*Lt',
+      counts: { nodes: nodes.length, edges: edges.length, evidence: evidence.length, risks: risks.length, followups: followups.filter(item => item.status === 'open').length, reviews: reviews.length, tasks: tasks.length },
+      nodes: nodes.slice(0, 300).map(node => ({ id: node.id, name: node.name, kind: node.kind, layer: node.layer, tenant: node.tenant, pool: node.pool, importance: node.importance, sensitivity: node.sensitivity, availability: node.availability, impact: node.impact, risk_source: node.risk_source, risk_name: node.risk_name, probability: node.probability, description: node.description, source: node.meta?.source, confidence: node.meta?.confidence })),
+      edges: edges.slice(0, 500).map(edge => ({ id: edge.id, from_id: edge.from_id, to_id: edge.to_id, relation: edge.relation, active: edge.active, source: edge.source, confidence: edge.confidence, factors: edge.factors, valid_from: edge.valid_from, valid_to: edge.valid_to })),
+      risks: risks.slice(0, 200).map(risk => ({ id: risk.id, source_id: risk.source_id, target_id: risk.target_id, path: risk.path, level: risk.level, priority: risk.priority, score: risk.score, penetration: risk.penetration, penetration_level: risk.penetration_level, probability: risk.probability, loss: risk.loss, risk_value: risk.risk_value, reviewRequired: risk.reviewRequired, reviewReasons: risk.reviewReasons, recommendation: risk.recommendation, evidenceChain: risk.evidenceChain, reason: risk.reason })),
+      evidence: evidence.slice(0, 200).map(item => ({ filename: item.filename, type: item.type, status: item.status, source: item.source, confidence: item.confidence, error: item.error, extraction: item.extraction })),
+      followups: followups.slice(0, 200).map(item => ({ title: item.title, question: item.question, status: item.status, answer: item.answer })),
+      reviews: reviews.slice(0, 200),
+      tasks: tasks.slice(0, 200).map(item => ({ title: item.title, owner: item.owner, status: item.status, due_date: item.due_date, priority: item.priority, recommendation: item.recommendation }))
+    };
+  }
+
+  async llmReport() {
+    const projectId = this.ctx.params.projectId;
+    const snapshot = this.reportSnapshot(projectId);
+    try {
+      const report = await this.service.llm.report(snapshot);
+      const reportId = id('RPT');
+      const createdAt = this.service.db.now();
+      const actor = this.ctx.state.user?.username || 'system';
+      this.service.db.db.prepare('INSERT INTO llm_reports (id,project_id,model,report_json,status,error,created_at,created_by) VALUES (?,?,?,?,?,?,?,?)').run(reportId, projectId, report.model, JSON.stringify(report), 'generated', null, createdAt, actor);
+      this.service.db.audit(projectId, 'llm_report_generated', `${reportId} / ${report.model}`, actor);
+      ok(this.ctx, { id: reportId, project_id: projectId, model: report.model, generatedAt: report.generatedAt, report });
+    } catch (err) {
+      this.service.db.audit(projectId, 'llm_report_failed', err.message, this.ctx.state.user?.username || 'system');
+      this.ctx.status = 422;
+      this.ctx.body = { ok: false, error: `评估报告生成失败：${err.message}`, data: { retryable: true } };
+    }
+  }
+
+  async report() {
+    const projectId = this.ctx.params.projectId;
+    const snapshot = this.reportSnapshot(projectId);
+    const project = this.service.db.project(projectId);
+    ok(this.ctx, { ...snapshot, project, llmReport: this.service.db.llmReport(projectId), audit: this.service.db.db.prepare('SELECT * FROM audit_logs WHERE project_id=? ORDER BY created_at DESC LIMIT 100').all(projectId) });
   }
 
   async reportPdf() {

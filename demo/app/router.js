@@ -48,6 +48,7 @@ module.exports = app => {
   router.get('/api/v1/tasks/:projectId', controller.api.tasks);
   router.post('/api/v1/tasks/:taskId/status', controller.api.updateTask);
   router.get('/api/v1/audit/:projectId', controller.api.audit);
+  router.post('/api/v1/report/:projectId/llm', controller.api.llmReport);
   router.get('/api/v1/report/:projectId.pdf', controller.api.reportPdf);
   router.get('/api/v1/report/:projectId', controller.api.report);
 };

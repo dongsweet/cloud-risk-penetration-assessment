@@ -37,6 +37,7 @@ function permissionFor(method, pathname) {
   if (pathname === '/api/v1/system/config') return method === 'GET' ? 'system.config.read' : 'system.config.write';
   if (pathname === '/api/v1/users' || /^\/api\/v1\/users\/[^/]+(?:\/password)?$/.test(pathname)) return 'users.admin';
   if (pathname.startsWith('/api/v1/audit/') || pathname === '/api/v1/auth-events') return 'audit.read';
+  if (/^\/api\/v1\/report\/[^/]+\/llm$/.test(pathname)) return method === 'POST' ? 'assessment.write' : 'report.read';
   if (pathname.startsWith('/api/v1/report/')) return 'report.read';
   if (pathname === '/api/v1/projects') return method === 'POST' ? 'project.write' : 'business.read';
   if (/^\/api\/v1\/risks\/[^/]+\/config$/.test(pathname)) return 'risk.config.write';
